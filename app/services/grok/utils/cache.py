@@ -10,7 +10,6 @@ from app.core.storage import DATA_DIR
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
-CHAT_UPLOAD_PREFIX = "chat-upload-"
 
 
 class CacheService:
@@ -24,20 +23,16 @@ class CacheService:
         self.video_dir.mkdir(parents=True, exist_ok=True)
 
     def _cache_dir(self, media_type: str):
-        return self.image_dir if media_type in {"image", "chat_upload"} else self.video_dir
+        return self.image_dir if media_type == "image" else self.video_dir
 
     def _allowed_exts(self, media_type: str):
-        return IMAGE_EXTS if media_type in {"image", "chat_upload"} else VIDEO_EXTS
+        return IMAGE_EXTS if media_type == "image" else VIDEO_EXTS
 
     def _matches_media_type(self, media_type: str, file_path) -> bool:
         if not file_path.is_file():
             return False
         if file_path.suffix.lower() not in self._allowed_exts(media_type):
             return False
-        if media_type == "chat_upload":
-            return file_path.name.startswith(CHAT_UPLOAD_PREFIX)
-        if media_type == "image":
-            return not file_path.name.startswith(CHAT_UPLOAD_PREFIX)
         return True
 
     def _media_meta_dir(self):
@@ -135,9 +130,8 @@ class CacheService:
         metadata_by_post_id = self._load_video_metadata() if media_type == "video" else {}
 
         for item in paged:
-            file_media_type = "image" if media_type == "chat_upload" else media_type
-            item["view_url"] = f"/v1/files/{file_media_type}/{item['name']}"
-            if media_type in {"image", "chat_upload"}:
+            item["view_url"] = f"/v1/files/{media_type}/{item['name']}"
+            if media_type == "image":
                 item["preview_url"] = item["view_url"]
             if media_type != "video":
                 continue

@@ -55,7 +55,7 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
   const SIDEBAR_STATE_KEY = 'grok2api_chat_sidebar_collapsed';
   const ACTIVE_SESSION_STORAGE_KEY = 'grok2api_chat_active_session_id';
   const LEGACY_MIGRATED_KEY = 'grok2api_chat_sessions_migrated';
-  const STORAGE_SCHEMA_VERSION = 1;
+  const STORAGE_SCHEMA_VERSION = 2;
   const AUTO_SCROLL_THRESHOLD = 48;
   const STREAM_RENDER_INTERVAL_MS = 96;
   const STREAM_PERSIST_INTERVAL_MS = 320;
@@ -66,6 +66,7 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
   const chatSessionStore = createChatSessionStore({ dbVersion: STORAGE_SCHEMA_VERSION });
   let storageQueue = Promise.resolve();
   let storageFallbackMode = false;
+  const attachmentObjectUrls = new Map();
 
   function generateId() {
     return crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
@@ -110,6 +111,89 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     return trimPersistText(raw, 2048);
   }
 
+  function buildIndexedDbAttachmentUrl(attachmentId) {
+    const id = String(attachmentId || '').trim();
+    return id ? `indexeddb:chat-attachment:${id}` : '';
+  }
+
+  function parseIndexedDbAttachmentUrl(value) {
+    const raw = String(value || '').trim();
+    const prefix = 'indexeddb:chat-attachment:';
+    return raw.startsWith(prefix) ? raw.slice(prefix.length) : '';
+  }
+
+  function getImageBlockAttachmentId(block) {
+    if (!block || typeof block !== 'object') return '';
+    if (block.attachmentId) return String(block.attachmentId || '').trim();
+    const imageUrl = block.image_url && typeof block.image_url === 'object'
+      ? String(block.image_url.url || '').trim()
+      : String(block.url || '').trim();
+    return parseIndexedDbAttachmentUrl(imageUrl);
+  }
+
+  function rememberAttachmentObjectUrl(attachmentId, blob) {
+    const id = String(attachmentId || '').trim();
+    if (!id || !(blob instanceof Blob)) return '';
+    const existing = attachmentObjectUrls.get(id);
+    if (existing) return existing;
+    const objectUrl = URL.createObjectURL(blob);
+    attachmentObjectUrls.set(id, objectUrl);
+    return objectUrl;
+  }
+
+  function revokeAttachmentObjectUrl(attachmentId) {
+    const id = String(attachmentId || '').trim();
+    if (!id) return;
+    const objectUrl = attachmentObjectUrls.get(id);
+    if (objectUrl) {
+      URL.revokeObjectURL(objectUrl);
+      attachmentObjectUrls.delete(id);
+    }
+  }
+
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      if (!(blob instanceof Blob)) {
+        reject(new Error('图片内容不可用'));
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(reader.error || new Error('读取图片失败'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function getStoredAttachment(attachmentId) {
+    const id = String(attachmentId || '').trim();
+    if (!id || storageFallbackMode) return null;
+    try {
+      return await chatSessionStore.getAttachment(id);
+    } catch (e) {
+      console.warn('load chat attachment failed', e);
+      return null;
+    }
+  }
+
+  async function resolveStoredAttachmentPreview(attachmentId) {
+    const record = await getStoredAttachment(attachmentId);
+    if (!record || !(record.blob instanceof Blob)) return null;
+    return {
+      name: record.name || 'image',
+      mime: record.mime || record.blob.type || 'image/jpeg',
+      size: Number(record.size || record.blob.size || 0) || 0,
+      data: rememberAttachmentObjectUrl(record.id, record.blob),
+      attachmentId: record.id,
+      stored: true
+    };
+  }
+
+  async function resolveStoredAttachmentDataUrl(attachmentId) {
+    const record = await getStoredAttachment(attachmentId);
+    if (!record || !(record.blob instanceof Blob)) return '';
+    return blobToDataUrl(record.blob);
+  }
+
   function sanitizePersistContent(content) {
     if (typeof content === 'string') {
       return trimPersistText(content);
@@ -124,10 +208,16 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
         const imageUrl = block.image_url && typeof block.image_url === 'object'
           ? sanitizePersistUrl(block.image_url.url || '')
           : sanitizePersistUrl(block.url || '');
-        return imageUrl ? {
+        const attachmentId = getImageBlockAttachmentId(block);
+        const persistedUrl = attachmentId ? buildIndexedDbAttachmentUrl(attachmentId) : imageUrl;
+        return persistedUrl ? {
           type: 'image_url',
-          image_url: { url: imageUrl },
-          persistedPreview: true
+          image_url: { url: persistedUrl },
+          attachmentId: attachmentId || undefined,
+          name: trimPersistText(block.name || '', 256),
+          mime: trimPersistText(block.mime || '', 128),
+          size: Number(block.size || 0) || 0,
+          persistedPreview: Boolean(attachmentId || imageUrl)
         } : { type: 'image_url', persistedPreview: false };
       }
       if (block.type === 'file') {
@@ -434,7 +524,67 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     }, -1) + 1;
   }
 
-  function restoreActiveSession() {
+  async function buildUserAttachmentsFromContent(content) {
+    if (!Array.isArray(content)) return [];
+    const results = [];
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type === 'image_url') {
+        const attachmentId = getImageBlockAttachmentId(block);
+        if (attachmentId) {
+          const preview = await resolveStoredAttachmentPreview(attachmentId);
+          if (preview) {
+            results.push({
+              ...preview,
+              name: block.name || preview.name || '图片附件',
+              mime: block.mime || preview.mime || 'image/jpeg',
+              size: Number(block.size || preview.size || 0) || 0
+            });
+            continue;
+          }
+          results.push({
+            mime: block.mime || 'image/jpeg',
+            name: block.name || '图片附件',
+            placeholder: true,
+            placeholderLabel: '图片附件未缓存'
+          });
+          continue;
+        }
+        const imageUrl = block.image_url && typeof block.image_url === 'object'
+          ? String(block.image_url.url || '').trim()
+          : '';
+        if (imageUrl) {
+          results.push({
+            mime: block.mime || 'image/jpeg',
+            name: block.name || 'image',
+            data: imageUrl,
+            size: Number(block.size || 0) || 0
+          });
+          continue;
+        }
+        results.push({
+          mime: block.mime || 'image/jpeg',
+          name: block.name || '图片附件',
+          placeholder: true,
+          placeholderLabel: '图片附件未缓存'
+        });
+      }
+      if (block.type === 'file' && (block.data || block.url)) {
+        results.push({ mime: block.mime || '', name: block.name || 'file', data: block.data || block.url });
+      } else if (block.type === 'file') {
+        results.push({
+          mime: block.mime || '',
+          name: block.name || 'file',
+          placeholder: true,
+          placeholderLabel: '文件附件未缓存',
+          size: Number(block.size || 0) || 0
+        });
+      }
+    }
+    return results;
+  }
+
+  async function restoreActiveSession() {
     const session = getActiveSession();
     if (!session) return;
     messageHistory = normalizeRuntimeMessages(session.messages);
@@ -457,37 +607,7 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
           updateMessage(entry, text, true);
         }
       } else if (entry && msg.role === 'user') {
-        let msgAttachments = [];
-        if (Array.isArray(msg.content)) {
-          msgAttachments = msg.content
-            .filter((b) => b && (b.type === 'image_url' || b.type === 'file'))
-            .map((b) => {
-              if (b.type === 'image_url' && b.image_url && b.image_url.url) {
-                return { mime: 'image/jpeg', name: 'image', data: b.image_url.url };
-              }
-              if (b.type === 'image_url') {
-                return {
-                  mime: 'image/jpeg',
-                  name: '图片附件',
-                  placeholder: true,
-                  placeholderLabel: '图片附件未缓存'
-                };
-              }
-              if (b.type === 'file' && (b.data || b.url)) {
-                return { mime: b.mime || '', name: b.name || 'file', data: b.data || b.url };
-              }
-              if (b.type === 'file') {
-                return {
-                  mime: b.mime || '',
-                  name: b.name || 'file',
-                  placeholder: true,
-                  placeholderLabel: '文件附件未缓存',
-                  size: Number(b.size || 0) || 0
-                };
-              }
-              return null;
-            }).filter(Boolean);
-        }
+        const msgAttachments = await buildUserAttachmentsFromContent(msg.content);
         renderUserMessage(entry, text, msgAttachments);
       }
     }
@@ -632,47 +752,17 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     if (isMobileSidebar()) closeSidebar();
   }
 
-  function collectChatUploadCacheNames(session) {
+  function collectChatAttachmentIds(session) {
     const picked = new Set();
     if (!session || !Array.isArray(session.messages)) return [];
 
-    const tryCollectFromUrl = (value) => {
-      const text = String(value || '').trim();
-      if (!text) return;
-      const matches = text.match(/chat-upload-[a-z0-9]+\.[a-z0-9]+/ig);
-      if (matches) {
-        matches.forEach((name) => picked.add(name));
-      }
-    };
-
     const collectFromBlocks = (content) => {
-      if (typeof content === 'string') {
-        tryCollectFromUrl(content);
-        return;
-      }
       if (!Array.isArray(content)) return;
       content.forEach((block) => {
         if (!block || typeof block !== 'object') return;
-        if (block.cacheName) {
-          tryCollectFromUrl(block.cacheName);
-        }
-        if (block.url) {
-          tryCollectFromUrl(block.url);
-        }
-        if (block.data && typeof block.data === 'string' && !String(block.data).startsWith('data:')) {
-          tryCollectFromUrl(block.data);
-        }
         if (block.type === 'image_url') {
-          const imageUrl = block.image_url && typeof block.image_url === 'object'
-            ? block.image_url.url
-            : '';
-          tryCollectFromUrl(imageUrl);
-        }
-        if (block.type === 'file') {
-          const fileData = block.file && typeof block.file === 'object'
-            ? block.file.file_data
-            : '';
-          tryCollectFromUrl(fileData);
+          const attachmentId = getImageBlockAttachmentId(block);
+          if (attachmentId) picked.add(attachmentId);
         }
       });
     };
@@ -688,45 +778,13 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     return Array.from(picked);
   }
 
-  async function deleteChatUploadCache(files) {
-    const names = Array.isArray(files)
-      ? Array.from(new Set(files.map((item) => String(item || '').trim()).filter((name) => /^chat-upload-/i.test(name))))
-      : [];
-    if (!names.length) return;
-
-    let headers = { 'Content-Type': 'application/json' };
-    try {
-      const authHeader = await ensurePublicKey();
-      headers = {
-        ...headers,
-        ...buildAuthHeaders(authHeader)
-      };
-    } catch (e) {
-      // ignore auth helper failures
-    }
-
-    const res = await fetch('/v1/public/chat/delete-upload-cache', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ files: names })
-    });
-    if (!res.ok) {
-      throw new Error('删除聊天上传缓存失败');
-    }
-  }
-
   async function deleteSession(id) {
     if (!sessionsData) return;
     const idx = sessionsData.sessions.findIndex((s) => s.id === id);
     if (idx === -1) return;
     const targetSession = sessionsData.sessions[idx];
     await ensureSessionMessagesLoaded(targetSession);
-    const cacheNames = collectChatUploadCacheNames(targetSession);
-    try {
-      await deleteChatUploadCache(cacheNames);
-    } catch (e) {
-      console.warn('deleteSession cache cleanup failed', e);
-    }
+    collectChatAttachmentIds(targetSession).forEach(revokeAttachmentObjectUrl);
     sessionsData.sessions.splice(idx, 1);
     if (!storageFallbackMode) {
       void enqueueStorageWork(async () => {
@@ -741,7 +799,7 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
       const newIdx = Math.min(idx, sessionsData.sessions.length - 1);
       sessionsData.activeId = sessionsData.sessions[newIdx].id;
       await ensureSessionMessagesLoaded(sessionsData.sessions[newIdx]);
-      restoreActiveSession();
+      await restoreActiveSession();
       restoreSessionModel();
     }
     saveSessions();
@@ -761,7 +819,7 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     const target = getActiveSession();
     await ensureSessionMessagesLoaded(target);
     if (target) target.unread = false;
-    restoreActiveSession();
+    await restoreActiveSession();
     restoreSessionModel();
     saveSessions();
     renderSessionList();
@@ -911,7 +969,7 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     }
     const activeSession = getActiveSession();
     await ensureSessionMessagesLoaded(activeSession);
-    restoreActiveSession();
+    await restoreActiveSession();
     restoreSessionModel();
     renderSessionList();
     saveSessions();
@@ -1374,15 +1432,6 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
       .filter(Boolean);
   }
 
-  function blobToDataUrl(blob) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || ''));
-      reader.onerror = () => reject(reader.error || new Error('读取图片失败'));
-      reader.readAsDataURL(blob);
-    });
-  }
-
   function inferImageExtension(mime, fallbackUrl) {
     const normalizedMime = String(mime || '').trim().toLowerCase();
     if (normalizedMime === 'image/jpeg') return 'jpg';
@@ -1410,6 +1459,7 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
         mime,
         name: `grok-image-${index + 1}.${ext}`,
         data,
+        blob,
         source: 'assistant'
       };
     } catch (e) {
@@ -1472,12 +1522,17 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
       toast('引用图片失败', 'error');
       return;
     }
-    imageAttachments.forEach((item) => {
-      attachments.push({
-        ...item,
-        name: buildUniqueFileName(item.name || 'image')
-      });
-    });
+    for (const item of imageAttachments) {
+      const safeName = buildUniqueFileName(item.name || 'image');
+      if (item.blob instanceof Blob) {
+        attachments.push(await saveChatImageAttachment(item.blob, safeName));
+      } else {
+        attachments.push({
+          ...item,
+          name: safeName
+        });
+      }
+    }
     showAttachmentBadge();
     if (promptInput) {
       promptInput.focus();
@@ -3442,49 +3497,60 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     return buildMessagesFrom(messageHistory);
   }
 
-  function sanitizeRequestContent(content) {
+  async function sanitizeRequestContent(content) {
     if (typeof content === 'string') return content;
     if (!Array.isArray(content)) return content;
-    return content.map((block) => {
-      if (!block || typeof block !== 'object') return null;
+    const mapped = [];
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
       if (block.type === 'text') {
         const text = String(block.text || '');
-        return text ? { type: 'text', text } : null;
+        if (text) mapped.push({ type: 'text', text });
+        continue;
       }
       if (block.type === 'image_url') {
+        const attachmentId = getImageBlockAttachmentId(block);
+        if (attachmentId) {
+          const dataUrl = await resolveStoredAttachmentDataUrl(attachmentId);
+          if (dataUrl) {
+            mapped.push({ type: 'image_url', image_url: { url: dataUrl } });
+          } else {
+            throw new Error('图片附件未找到，无法继续发送该上下文');
+          }
+          continue;
+        }
         const imageUrl = block.image_url && typeof block.image_url === 'object'
           ? String(block.image_url.url || '').trim()
           : String(block.url || '').trim();
-        if (!imageUrl) return null;
-        return { type: 'image_url', image_url: { url: imageUrl } };
+        if (imageUrl) mapped.push({ type: 'image_url', image_url: { url: imageUrl } });
+        continue;
       }
       if (block.type === 'file') {
         const fileData = block.file && typeof block.file === 'object'
           ? String(block.file.file_data || '').trim()
           : String(block.url || block.data || '').trim();
-        if (!fileData) return null;
-        return { type: 'file', file: { file_data: fileData } };
+        if (fileData) mapped.push({ type: 'file', file: { file_data: fileData } });
       }
-      return null;
-    }).filter(Boolean);
+    }
+    return mapped;
   }
 
-  function buildMessagesFrom(history) {
+  async function buildMessagesFrom(history) {
     const payload = [];
     const systemPrompt = systemInput ? systemInput.value.trim() : '';
     if (systemPrompt) {
       payload.push({ role: 'system', content: systemPrompt });
     }
     for (const msg of history) {
-      payload.push({ role: msg.role, content: sanitizeRequestContent(msg.content) });
+      payload.push({ role: msg.role, content: await sanitizeRequestContent(msg.content) });
     }
     return payload;
   }
 
-  function buildPayload() {
+  async function buildPayload() {
     const payload = {
       model: (modelSelect && modelSelect.value) || 'grok-3',
-      messages: buildMessages(),
+      messages: await buildMessages(),
       stream: true,
       temperature: Number(tempRange ? tempRange.value : 0.8),
       top_p: Number(topPRange ? topPRange.value : 0.95)
@@ -3496,10 +3562,10 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     return payload;
   }
 
-  function buildPayloadFrom(history) {
+  async function buildPayloadFrom(history) {
     const payload = {
       model: (modelSelect && modelSelect.value) || 'grok-3',
-      messages: buildMessagesFrom(history),
+      messages: await buildMessagesFrom(history),
       stream: true,
       temperature: Number(tempRange ? tempRange.value : 0.8),
       top_p: Number(topPRange ? topPRange.value : 0.95)
@@ -3730,26 +3796,41 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     });
   }
 
-  async function uploadCachedChatImage(file) {
-    const formData = new FormData();
-    formData.append('file', file, file.name || 'image');
-    let headers = {};
-    try {
-      const authHeader = await ensurePublicKey();
-      headers = buildAuthHeaders(authHeader);
-    } catch (e) {
-      // ignore auth helper failures
+  async function saveChatImageAttachment(file, safeName) {
+    if (!(file instanceof Blob)) {
+      throw new Error('图片内容不可用');
     }
-    const res = await fetch('/v1/public/chat/upload-image', {
-      method: 'POST',
-      headers,
-      body: formData
+    if (storageFallbackMode) {
+      const dataUrl = await blobToDataUrl(file);
+      return {
+        name: safeName,
+        data: dataUrl,
+        mime: file.type || 'image/jpeg',
+        size: Number(file.size || 0) || 0,
+        stored: false
+      };
+    }
+    const activeSession = getActiveSession();
+    const sessionId = activeSession && activeSession.id ? activeSession.id : (sessionsData && sessionsData.activeId) || '';
+    const attachmentId = generateId();
+    await chatSessionStore.saveAttachment(sessionId, {
+      id: attachmentId,
+      name: safeName,
+      mime: file.type || 'image/jpeg',
+      size: Number(file.size || 0) || 0,
+      blob: file,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.status !== 'success' || !data.url) {
-      throw new Error(data.detail || '图片缓存上传失败');
-    }
-    return data;
+    return {
+      name: safeName,
+      data: rememberAttachmentObjectUrl(attachmentId, file),
+      mime: file.type || 'image/jpeg',
+      size: Number(file.size || 0) || 0,
+      attachmentId,
+      blob: file,
+      stored: true
+    };
   }
 
   function buildUniqueFileName(name) {
@@ -3775,16 +3856,7 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
       const safeName = buildUniqueFileName(file.name || 'file');
       const isImage = String(file.type || '').startsWith('image/');
       if (isImage) {
-        const uploaded = await uploadCachedChatImage(file);
-        attachments.push({
-          name: safeName,
-          data: uploaded.url,
-          url: uploaded.url,
-          mime: uploaded.content_type || file.type || 'image/jpeg',
-          size: Number(uploaded.size_bytes || file.size || 0) || 0,
-          cached: true,
-          cacheName: uploaded.filename || ''
-        });
+        attachments.push(await saveChatImageAttachment(file, safeName));
       } else {
         let dataUrl = '';
         try {
@@ -3934,7 +4006,6 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     fixedViewportAnchor = null;
 
     abortController = new AbortController();
-    const payload = buildPayloadFrom(historySlice);
 
     let headers = { 'Content-Type': 'application/json' };
     try {
@@ -3945,6 +4016,7 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     }
 
     try {
+      const payload = await buildPayloadFrom(historySlice);
       const res = await fetch('/v1/public/chat/completions', {
         method: 'POST',
         headers,
@@ -3994,24 +4066,43 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     const userEntry = createMessage('user', '');
     renderUserMessage(userEntry, prompt, attachmentsSnapshot);
 
+    const activeSession = getActiveSession();
     let content = prompt;
     if (attachments.length) {
       const blocks = [];
       if (prompt) {
         blocks.push({ type: 'text', text: prompt });
       }
-      attachments.forEach((item) => {
+      for (const item of attachments) {
         const isImage = String(item.mime || '').startsWith('image/');
         if (isImage) {
-          blocks.push({ type: 'image_url', image_url: { url: item.data } });
+          const attachmentId = String(item.attachmentId || '').trim();
+          if (attachmentId && item.blob instanceof Blob && !storageFallbackMode) {
+            await chatSessionStore.saveAttachment((activeSession && activeSession.id) || '', {
+              id: attachmentId,
+              name: item.name || 'image',
+              mime: item.mime || 'image/jpeg',
+              size: Number(item.size || item.blob.size || 0) || 0,
+              blob: item.blob,
+              createdAt: Date.now(),
+              updatedAt: Date.now()
+            });
+          }
+          blocks.push({
+            type: 'image_url',
+            image_url: { url: attachmentId ? buildIndexedDbAttachmentUrl(attachmentId) : item.data },
+            attachmentId: attachmentId || undefined,
+            name: item.name || 'image',
+            mime: item.mime || 'image/jpeg',
+            size: Number(item.size || 0) || 0
+          });
         } else {
           blocks.push({ type: 'file', file: { file_data: item.data } });
         }
-      });
+      }
       content = blocks;
     }
 
-    const activeSession = getActiveSession();
     const nextOrder = getMessageOrderBase(activeSession);
     const userMessage = normalizeRuntimeMessage({
       id: generateId(),
@@ -4044,7 +4135,6 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     fixedViewportAnchor = null;
 
     abortController = new AbortController();
-    const payload = buildPayload();
 
     let headers = { 'Content-Type': 'application/json' };
     try {
@@ -4055,6 +4145,7 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     }
 
     try {
+      const payload = await buildPayload();
       const res = await fetch('/v1/public/chat/completions', {
         method: 'POST',
         headers,

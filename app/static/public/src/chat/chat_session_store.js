@@ -42,10 +42,28 @@ function normalizeStoredMessage(sessionId, message, index = 0) {
   };
 }
 
+function normalizeAttachmentRecord(sessionId, attachment) {
+  if (!attachment || typeof attachment !== 'object') return null;
+  const id = String(attachment.id || '');
+  const blob = attachment.blob;
+  if (!id || !(blob instanceof Blob)) return null;
+  const createdAt = Number(attachment.createdAt || 0) || Date.now();
+  return {
+    id,
+    sessionId,
+    name: String(attachment.name || 'image'),
+    mime: String(attachment.mime || blob.type || 'application/octet-stream'),
+    size: Number(attachment.size || blob.size || 0) || 0,
+    blob,
+    createdAt,
+    updatedAt: Number(attachment.updatedAt || createdAt) || createdAt
+  };
+}
+
 export function createChatSessionStore(options = {}) {
   const {
     dbName = 'grok2api-chat-db',
-    dbVersion = 1
+    dbVersion = 2
   } = options;
 
   let dbPromise = null;
@@ -68,6 +86,11 @@ export function createChatSessionStore(options = {}) {
           const messagesStore = db.createObjectStore('messages', { keyPath: 'id' });
           messagesStore.createIndex('sessionId', 'sessionId');
           messagesStore.createIndex('sessionIdOrder', ['sessionId', 'order']);
+        }
+        if (!db.objectStoreNames.contains('attachments')) {
+          const attachmentsStore = db.createObjectStore('attachments', { keyPath: 'id' });
+          attachmentsStore.createIndex('sessionId', 'sessionId');
+          attachmentsStore.createIndex('updatedAt', 'updatedAt');
         }
         if (!db.objectStoreNames.contains('meta')) {
           db.createObjectStore('meta', { keyPath: 'key' });
@@ -171,6 +194,52 @@ export function createChatSessionStore(options = {}) {
     });
   }
 
+  async function saveAttachment(sessionId, attachment) {
+    const normalized = normalizeAttachmentRecord(sessionId, attachment);
+    if (!normalized) return null;
+    await withTransaction(['attachments'], 'readwrite', async (transaction) => {
+      transaction.objectStore('attachments').put(normalized);
+    });
+    return {
+      id: normalized.id,
+      sessionId: normalized.sessionId,
+      name: normalized.name,
+      mime: normalized.mime,
+      size: normalized.size,
+      createdAt: normalized.createdAt,
+      updatedAt: normalized.updatedAt
+    };
+  }
+
+  async function getAttachment(id) {
+    const attachmentId = String(id || '').trim();
+    if (!attachmentId) return null;
+    return withTransaction(['attachments'], 'readonly', async (transaction) => {
+      const row = await promisifyRequest(transaction.objectStore('attachments').get(attachmentId));
+      return row && row.blob instanceof Blob ? row : null;
+    });
+  }
+
+  async function deleteSessionAttachments(sessionId) {
+    return withTransaction(['attachments'], 'readwrite', async (transaction) => {
+      const store = transaction.objectStore('attachments');
+      const index = store.index('sessionId');
+      await new Promise((resolve, reject) => {
+        const request = index.openKeyCursor(IDBKeyRange.only(sessionId));
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) {
+            resolve();
+            return;
+          }
+          store.delete(cursor.primaryKey);
+          cursor.continue();
+        };
+        request.onerror = () => reject(request.error || new Error('删除会话附件失败'));
+      });
+    });
+  }
+
   async function deleteSessionMessages(sessionId) {
     return withTransaction(['messages'], 'readwrite', async (transaction) => {
       const store = transaction.objectStore('messages');
@@ -192,11 +261,11 @@ export function createChatSessionStore(options = {}) {
   }
 
   async function deleteSession(sessionId) {
-    return withTransaction(['sessions', 'messages'], 'readwrite', async (transaction) => {
+    return withTransaction(['sessions', 'messages', 'attachments'], 'readwrite', async (transaction) => {
       transaction.objectStore('sessions').delete(sessionId);
-      const store = transaction.objectStore('messages');
-      const index = store.index('sessionId');
-      await new Promise((resolve, reject) => {
+      const deleteBySession = (storeName, errorMessage) => new Promise((resolve, reject) => {
+        const store = transaction.objectStore(storeName);
+        const index = store.index('sessionId');
         const request = index.openKeyCursor(IDBKeyRange.only(sessionId));
         request.onsuccess = () => {
           const cursor = request.result;
@@ -207,8 +276,12 @@ export function createChatSessionStore(options = {}) {
           store.delete(cursor.primaryKey);
           cursor.continue();
         };
-        request.onerror = () => reject(request.error || new Error('删除会话失败'));
+        request.onerror = () => reject(request.error || new Error(errorMessage));
       });
+      await Promise.all([
+        deleteBySession('messages', '删除会话消息失败'),
+        deleteBySession('attachments', '删除会话附件失败')
+      ]);
     });
   }
 
@@ -283,10 +356,13 @@ export function createChatSessionStore(options = {}) {
     saveSession,
     saveSessions,
     getSessionMessages,
-    saveMessage,
-    saveMessages,
-    deleteSessionMessages,
-    deleteSession,
+      saveMessage,
+      saveMessages,
+      saveAttachment,
+      getAttachment,
+      deleteSessionAttachments,
+      deleteSessionMessages,
+      deleteSession,
     importLegacySnapshot,
     requestPersistentStorage,
     estimateStorage
