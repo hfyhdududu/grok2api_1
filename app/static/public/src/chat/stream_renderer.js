@@ -9,10 +9,10 @@ function syncMediaCardNode(node, item) {
   if (!(img instanceof HTMLImageElement)) {
     img = document.createElement('img');
     img.loading = 'lazy';
-    img.referrerPolicy = 'no-referrer';
-    img.crossOrigin = 'anonymous';
     node.insertBefore(img, node.firstChild);
   }
+  img.removeAttribute('referrerpolicy');
+  img.removeAttribute('crossorigin');
   if (img.getAttribute('src') !== item.src) {
     img.setAttribute('src', item.src);
   }

@@ -231,7 +231,7 @@ function renderLiteBody(text, options = {}) {
     const safeUrl = escapeHtml(String(url || '').trim());
     const safeAlt = escapeHtml(String(alt || 'image').trim() || 'image');
     if (!safeUrl) return '';
-    return `<figure class="message-image-card stream-lite-image-card"><img src="${safeUrl}" alt="${safeAlt}" loading="lazy" referrerpolicy="no-referrer" crossorigin="anonymous"></figure>`;
+    return `<figure class="message-image-card stream-lite-image-card"><img src="${safeUrl}" alt="${safeAlt}" loading="lazy"></figure>`;
   }));
   const normalizedParagraphs = withImages.split(/\n{2,}/);
   return normalizedParagraphs

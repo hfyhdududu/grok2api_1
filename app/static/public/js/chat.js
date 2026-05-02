@@ -2,6 +2,7 @@ import { buildMediaItems } from '../src/chat/media_items.js';
 import { PretextLayoutEngine } from '../src/chat/pretext_layout.js';
 import { splitStableAndTail, renderLiteMarkdown } from '../src/chat/stream_blocks.js';
 import { StreamRenderer } from '../src/chat/stream_renderer.js';
+import { createChatSessionStore } from '../src/chat/chat_session_store.js';
 
 (() => {
   const modelSelect = document.getElementById('modelSelect');
@@ -52,8 +53,9 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
   const STORAGE_KEY = 'grok2api_chat_sessions';
   const SESSION_STORAGE_FALLBACK_KEY = 'grok2api_chat_sessions_fallback';
   const SIDEBAR_STATE_KEY = 'grok2api_chat_sidebar_collapsed';
-  const MAX_CONTEXT_MESSAGES = 30;
-  const MAX_PERSIST_SESSIONS = 12;
+  const ACTIVE_SESSION_STORAGE_KEY = 'grok2api_chat_active_session_id';
+  const LEGACY_MIGRATED_KEY = 'grok2api_chat_sessions_migrated';
+  const STORAGE_SCHEMA_VERSION = 1;
   const AUTO_SCROLL_THRESHOLD = 48;
   const STREAM_RENDER_INTERVAL_MS = 96;
   const STREAM_PERSIST_INTERVAL_MS = 320;
@@ -61,6 +63,9 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
   const SEND_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"></path><path d="M22 2L15 22L11 13L2 9L22 2Z"></path></svg>';
   const STOP_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"></rect></svg>';
   let lastStorageErrorToastAt = 0;
+  const chatSessionStore = createChatSessionStore({ dbVersion: STORAGE_SCHEMA_VERSION });
+  let storageQueue = Promise.resolve();
+  let storageFallbackMode = false;
 
   function generateId() {
     return crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
@@ -211,25 +216,13 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
     return serialized;
   }
 
-  function buildSessionSnapshot(limitSessions = MAX_PERSIST_SESSIONS, activeOnly = false) {
+  function buildSessionSnapshot(activeOnly = false) {
     if (!sessionsData) return null;
     const sourceSessions = Array.isArray(sessionsData.sessions) ? sessionsData.sessions.slice() : [];
     sourceSessions.sort((a, b) => Number(b && b.updatedAt || 0) - Number(a && a.updatedAt || 0));
-    let picked = sourceSessions;
-    if (activeOnly) {
-      picked = sourceSessions.filter((session) => session && session.id === sessionsData.activeId);
-    } else if (limitSessions > 0 && sourceSessions.length > limitSessions) {
-      const activeId = sessionsData.activeId;
-      const selected = sourceSessions.slice(0, limitSessions);
-      if (activeId && !selected.some((session) => session && session.id === activeId)) {
-        const activeSession = sourceSessions.find((session) => session && session.id === activeId);
-        if (activeSession) {
-          selected.pop();
-          selected.push(activeSession);
-        }
-      }
-      picked = selected;
-    }
+    const picked = activeOnly
+      ? sourceSessions.filter((session) => session && session.id === sessionsData.activeId)
+      : sourceSessions;
     return {
       activeId: sessionsData.activeId,
       sessions: picked.map((session) => ({
@@ -243,7 +236,7 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
     const now = Date.now();
     if (now - lastStorageErrorToastAt < 2500) return;
     lastStorageErrorToastAt = now;
-    toast('会话保存失败，已自动精简本地缓存', 'error');
+    toast('会话保存失败，已切换到临时恢复模式', 'error');
   }
 
   function saveFallbackSession(snapshot) {
@@ -264,37 +257,143 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
     }
   }
 
-  function saveSessions() {
-    if (!sessionsData) return;
-    const attempts = [
-      buildSessionSnapshot(MAX_PERSIST_SESSIONS, false),
-      buildSessionSnapshot(6, false),
-      buildSessionSnapshot(1, true)
-    ].filter(Boolean);
+  function cloneMessages(messages) {
+    return Array.isArray(messages) ? messages.map((item) => ({ ...item })) : [];
+  }
+
+  function normalizeRuntimeMessage(message, index = 0) {
+    if (!message || typeof message !== 'object') return message;
+    const createdAt = Number(message.createdAt || message.updatedAt || 0) || Date.now() + index;
+    const updatedAt = Number(message.updatedAt || createdAt) || createdAt;
+    const order = Number(message.order);
+    return {
+      ...message,
+      id: String(message.id || generateId()),
+      createdAt,
+      updatedAt,
+      order: Number.isFinite(order) ? order : index
+    };
+  }
+
+  function normalizeRuntimeMessages(messages) {
+    return Array.isArray(messages)
+      ? messages.map((item, index) => normalizeRuntimeMessage(item, index)).filter(Boolean)
+      : [];
+  }
+
+  function buildSessionMeta(session) {
+    if (!session || typeof session !== 'object') return null;
+    return {
+      id: session.id,
+      title: session.title || '新会话',
+      model: session.model || '',
+      createdAt: Number(session.createdAt || 0) || Date.now(),
+      updatedAt: Number(session.updatedAt || 0) || Date.now(),
+      isDefaultTitle: session.isDefaultTitle !== false,
+      unread: Boolean(session.unread)
+    };
+  }
+
+  function setActiveSessionHint(sessionId) {
     try {
-      let saved = false;
-      for (const snapshot of attempts) {
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
-          clearFallbackSession();
-          saved = true;
-          break;
-        } catch (e) {
-          // 继续尝试更小的快照
-        }
-      }
-      if (!saved) {
-        const fallbackSnapshot = buildSessionSnapshot(1, true);
+      localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, sessionId || '');
+    } catch (e) {
+      // ignore storage errors
+    }
+  }
+
+  function clearLegacySessionSnapshot() {
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.setItem(LEGACY_MIGRATED_KEY, '1');
+    } catch (e) {
+      // ignore storage errors
+    }
+    clearFallbackSession();
+  }
+
+  function enqueueStorageWork(work) {
+    storageQueue = storageQueue
+      .then(() => work())
+      .catch((error) => {
+        storageFallbackMode = true;
+        const fallbackSnapshot = buildSessionSnapshot(true);
         if (!saveFallbackSession(fallbackSnapshot)) {
           notifyStorageFailure();
         }
-      }
-    } catch (e) {
-      const fallbackSnapshot = buildSessionSnapshot(1, true);
+        console.warn('chat session storage failed', error);
+      });
+    return storageQueue;
+  }
+
+  function persistSessionMeta(session) {
+    const meta = buildSessionMeta(session);
+    if (!meta || !meta.id || storageFallbackMode) return;
+    void enqueueStorageWork(async () => {
+      await chatSessionStore.saveSession(meta);
+    });
+  }
+
+  function persistMessageRecord(sessionId, message, orderHint = 0) {
+    if (!sessionId || !message || storageFallbackMode) return;
+    const normalized = serializeMessage(normalizeRuntimeMessage(message, orderHint));
+    void enqueueStorageWork(async () => {
+      await chatSessionStore.saveMessage(sessionId, normalized, orderHint);
+    });
+  }
+
+  function persistSessionMessages(session) {
+    if (!session || !session.id || storageFallbackMode) return;
+    const normalizedMessages = normalizeRuntimeMessages(session.messages).map((message) => serializeMessage(message));
+    void enqueueStorageWork(async () => {
+      await chatSessionStore.saveMessages(session.id, normalizedMessages);
+    });
+  }
+
+  function saveSessions() {
+    if (!sessionsData) return;
+    const sessionMetas = Array.isArray(sessionsData.sessions)
+      ? sessionsData.sessions.map((session) => buildSessionMeta(session)).filter(Boolean)
+      : [];
+    setActiveSessionHint(sessionsData.activeId || '');
+    if (storageFallbackMode) {
+      const fallbackSnapshot = buildSessionSnapshot(true);
       if (!saveFallbackSession(fallbackSnapshot)) {
         notifyStorageFailure();
       }
+      return;
     }
+    void enqueueStorageWork(async () => {
+      await chatSessionStore.saveSessions(sessionMetas);
+      await chatSessionStore.setMeta('activeSessionId', sessionsData.activeId || '');
+      await chatSessionStore.setMeta('schemaVersion', STORAGE_SCHEMA_VERSION);
+      clearFallbackSession();
+      clearLegacySessionSnapshot();
+    });
+  }
+
+  async function readLegacySnapshot() {
+    let snapshot = null;
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) snapshot = JSON.parse(raw);
+    } catch (e) {
+      snapshot = null;
+    }
+    if (!snapshot) {
+      try {
+        const fallbackRaw = sessionStorage.getItem(SESSION_STORAGE_FALLBACK_KEY);
+        if (fallbackRaw) snapshot = JSON.parse(fallbackRaw);
+      } catch (e) {
+        snapshot = null;
+      }
+    }
+    if (!snapshot || !Array.isArray(snapshot.sessions) || !snapshot.sessions.length) return null;
+    snapshot.sessions = snapshot.sessions.map((session) => ({
+      ...session,
+      messages: normalizeRuntimeMessages(session.messages)
+    }));
+    return snapshot;
   }
 
   function getActiveSession() {
@@ -302,24 +401,43 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
     return sessionsData.sessions.find((s) => s.id === sessionsData.activeId) || null;
   }
 
-  function trimMessageHistory(maxCount = MAX_CONTEXT_MESSAGES) {
-    if (!maxCount || maxCount <= 0) return;
-    if (messageHistory.length <= maxCount) return;
-    messageHistory = messageHistory.slice(-maxCount);
-    const session = getActiveSession();
-    if (session) {
-      session.messages = messageHistory.slice();
-      session.updatedAt = Date.now();
-      saveSessions();
-      renderSessionList();
+  async function ensureSessionMessagesLoaded(session) {
+    if (!session) return [];
+    if (session.messagesLoaded) {
+      if (!Array.isArray(session.messages)) session.messages = [];
+      return session.messages;
     }
+    if (storageFallbackMode) {
+      session.messages = normalizeRuntimeMessages(session.messages);
+      session.messagesLoaded = true;
+      return session.messages;
+    }
+    try {
+      const messages = await chatSessionStore.getSessionMessages(session.id);
+      session.messages = normalizeRuntimeMessages(messages);
+      session.messagesLoaded = true;
+      return session.messages;
+    } catch (e) {
+      console.warn('load session messages failed', e);
+      storageFallbackMode = true;
+      session.messages = normalizeRuntimeMessages(session.messages);
+      session.messagesLoaded = true;
+      return session.messages;
+    }
+  }
+
+  function getMessageOrderBase(session) {
+    if (!session || !Array.isArray(session.messages) || !session.messages.length) return 0;
+    return session.messages.reduce((maxOrder, message, index) => {
+      const candidate = Number(message && message.order);
+      return Number.isFinite(candidate) ? Math.max(maxOrder, candidate) : Math.max(maxOrder, index);
+    }, -1) + 1;
   }
 
   function restoreActiveSession() {
     const session = getActiveSession();
     if (!session) return;
-    messageHistory = Array.isArray(session.messages) ? session.messages.slice() : [];
-    trimMessageHistory();
+    messageHistory = normalizeRuntimeMessages(session.messages);
     if (chatLog) chatLog.innerHTML = '';
     if (!messageHistory.length) {
       showEmptyState();
@@ -341,34 +459,34 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
       } else if (entry && msg.role === 'user') {
         let msgAttachments = [];
         if (Array.isArray(msg.content)) {
-            msgAttachments = msg.content
-                .filter(b => b && (b.type === 'image_url' || b.type === 'file'))
-                .map(b => {
-                    if (b.type === 'image_url' && b.image_url && b.image_url.url) {
-                      return { mime: 'image/jpeg', name: 'image', data: b.image_url.url };
-                    }
-                    if (b.type === 'image_url') {
-                      return {
-                        mime: 'image/jpeg',
-                        name: '图片附件',
-                        placeholder: true,
-                        placeholderLabel: '图片附件未缓存'
-                      };
-                    }
-                    if (b.type === 'file' && (b.data || b.url)) {
-                      return { mime: b.mime || '', name: b.name || 'file', data: b.data || b.url };
-                    }
-                    if (b.type === 'file') {
-                      return {
-                        mime: b.mime || '',
-                        name: b.name || 'file',
-                        placeholder: true,
-                        placeholderLabel: '文件附件未缓存',
-                        size: Number(b.size || 0) || 0
-                      };
-                    }
-                    return null;
-                }).filter(Boolean);
+          msgAttachments = msg.content
+            .filter((b) => b && (b.type === 'image_url' || b.type === 'file'))
+            .map((b) => {
+              if (b.type === 'image_url' && b.image_url && b.image_url.url) {
+                return { mime: 'image/jpeg', name: 'image', data: b.image_url.url };
+              }
+              if (b.type === 'image_url') {
+                return {
+                  mime: 'image/jpeg',
+                  name: '图片附件',
+                  placeholder: true,
+                  placeholderLabel: '图片附件未缓存'
+                };
+              }
+              if (b.type === 'file' && (b.data || b.url)) {
+                return { mime: b.mime || '', name: b.name || 'file', data: b.data || b.url };
+              }
+              if (b.type === 'file') {
+                return {
+                  mime: b.mime || '',
+                  name: b.name || 'file',
+                  placeholder: true,
+                  placeholderLabel: '文件附件未缓存',
+                  size: Number(b.size || 0) || 0
+                };
+              }
+              return null;
+            }).filter(Boolean);
         }
         renderUserMessage(entry, text, msgAttachments);
       }
@@ -382,7 +500,8 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
   function syncCurrentSession() {
     const session = getActiveSession();
     if (!session) return;
-    session.messages = messageHistory.slice();
+    session.messages = normalizeRuntimeMessages(cloneMessages(messageHistory));
+    session.messagesLoaded = true;
     session.updatedAt = Date.now();
   }
 
@@ -500,7 +619,8 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
       isDefaultTitle: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      messages: []
+      messages: [],
+      messagesLoaded: true
     };
     sessionsData.sessions.unshift(session);
     sessionsData.activeId = id;
@@ -600,6 +720,7 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
     const idx = sessionsData.sessions.findIndex((s) => s.id === id);
     if (idx === -1) return;
     const targetSession = sessionsData.sessions[idx];
+    await ensureSessionMessagesLoaded(targetSession);
     const cacheNames = collectChatUploadCacheNames(targetSession);
     try {
       await deleteChatUploadCache(cacheNames);
@@ -607,6 +728,11 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
       console.warn('deleteSession cache cleanup failed', e);
     }
     sessionsData.sessions.splice(idx, 1);
+    if (!storageFallbackMode) {
+      void enqueueStorageWork(async () => {
+        await chatSessionStore.deleteSession(id);
+      });
+    }
     if (!sessionsData.sessions.length) {
       createSession();
       return;
@@ -614,6 +740,7 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
     if (sessionsData.activeId === id) {
       const newIdx = Math.min(idx, sessionsData.sessions.length - 1);
       sessionsData.activeId = sessionsData.sessions[newIdx].id;
+      await ensureSessionMessagesLoaded(sessionsData.sessions[newIdx]);
       restoreActiveSession();
       restoreSessionModel();
     }
@@ -621,12 +748,18 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
     renderSessionList();
   }
 
-  function switchSession(id) {
+  async function switchSession(id) {
     if (!sessionsData || sessionsData.activeId === id) return;
     syncCurrentSession();
+    const previousSession = getActiveSession();
+    if (previousSession) {
+      persistSessionMeta(previousSession);
+      persistSessionMessages(previousSession);
+    }
     syncSessionModel();
     sessionsData.activeId = id;
     const target = getActiveSession();
+    await ensureSessionMessagesLoaded(target);
     if (target) target.unread = false;
     restoreActiveSession();
     restoreSessionModel();
@@ -691,34 +824,48 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
     }
   }
 
-  function loadSessions() {
+  async function loadSessions() {
+    let state = null;
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        sessionsData = JSON.parse(raw);
-        if (!sessionsData || !Array.isArray(sessionsData.sessions)) {
-          sessionsData = null;
+      await chatSessionStore.openDatabase();
+      await Promise.all([
+        chatSessionStore.requestPersistentStorage(),
+        chatSessionStore.estimateStorage()
+      ]);
+      state = await chatSessionStore.getState();
+      if (!state.sessions.length) {
+        const legacySnapshot = await readLegacySnapshot();
+        if (legacySnapshot) {
+          await chatSessionStore.importLegacySnapshot(legacySnapshot);
+          clearLegacySessionSnapshot();
+          state = {
+            activeId: legacySnapshot.activeId,
+            sessions: legacySnapshot.sessions.map((session) => ({
+              ...buildSessionMeta(session),
+              messages: session.messages,
+              messagesLoaded: true
+            }))
+          };
         }
       }
     } catch (e) {
-      sessionsData = null;
-    }
-    if (!sessionsData) {
-      try {
-        const fallbackRaw = sessionStorage.getItem(SESSION_STORAGE_FALLBACK_KEY);
-        if (fallbackRaw) {
-          sessionsData = JSON.parse(fallbackRaw);
-          if (!sessionsData || !Array.isArray(sessionsData.sessions)) {
-            sessionsData = null;
-          }
-        }
-      } catch (e) {
-        sessionsData = null;
+      console.warn('load IndexedDB sessions failed', e);
+      storageFallbackMode = true;
+      const legacySnapshot = await readLegacySnapshot();
+      if (legacySnapshot) {
+        state = {
+          activeId: legacySnapshot.activeId,
+          sessions: legacySnapshot.sessions.map((session) => ({
+            ...buildSessionMeta(session),
+            messages: normalizeRuntimeMessages(session.messages),
+            messagesLoaded: true
+          }))
+        };
       }
     }
-    if (!sessionsData || !sessionsData.sessions.length) {
+    if (!state || !Array.isArray(state.sessions) || !state.sessions.length) {
       const id = generateId();
-      sessionsData = {
+      state = {
         activeId: id,
         sessions: [{
           id,
@@ -726,25 +873,48 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
           isDefaultTitle: true,
           createdAt: Date.now(),
           updatedAt: Date.now(),
-          messages: []
+          model: '',
+          unread: false,
+          messages: [],
+          messagesLoaded: true
         }]
       };
-      saveSessions();
     }
-    sessionsData.sessions.forEach((session) => {
-      if (session && typeof session.isDefaultTitle === 'undefined') {
-        session.isDefaultTitle = isDefaultTitleValue(session.title);
+    sessionsData = {
+      activeId: state.activeId,
+      sessions: state.sessions.map((session) => ({
+        id: session.id,
+        title: session.title || '新会话',
+        model: session.model || '',
+        isDefaultTitle: typeof session.isDefaultTitle === 'undefined'
+          ? isDefaultTitleValue(session.title)
+          : session.isDefaultTitle !== false,
+        createdAt: Number(session.createdAt || 0) || Date.now(),
+        updatedAt: Number(session.updatedAt || 0) || Date.now(),
+        unread: Boolean(session.unread),
+        messages: normalizeRuntimeMessages(session.messages),
+        messagesLoaded: Boolean(session.messagesLoaded)
+      }))
+    };
+    if (!sessionsData.activeId || !sessionsData.sessions.find((s) => s.id === sessionsData.activeId)) {
+      try {
+        const hinted = localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+        if (hinted && sessionsData.sessions.find((s) => s.id === hinted)) {
+          sessionsData.activeId = hinted;
+        }
+      } catch (e) {
+        sessionsData.activeId = sessionsData.sessions[0].id;
       }
-      if (!Array.isArray(session.messages)) {
-        session.messages = [];
-      }
-    });
+    }
     if (!sessionsData.activeId || !sessionsData.sessions.find((s) => s.id === sessionsData.activeId)) {
       sessionsData.activeId = sessionsData.sessions[0].id;
     }
+    const activeSession = getActiveSession();
+    await ensureSessionMessagesLoaded(activeSession);
     restoreActiveSession();
     restoreSessionModel();
     renderSessionList();
+    saveSessions();
   }
 
   function toast(message, type) {
@@ -1103,7 +1273,7 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
 
   function buildRenderedImageMarkdown(card) {
     let image = card && card.image && typeof card.image === 'object' ? card.image : null;
-    let original = image ? String(image.original || image.link || '').trim() : '';
+    let original = image ? String(image.original || image.thumbnail || '').trim() : '';
     let title = image ? normalizeSourceText(image.title || '') : '';
     
     if (!original && card && card.image_chunk) {
@@ -1130,7 +1300,10 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
       const articleUrl = image ? String(image.link || '').trim() : '';
       const originalUrl = image ? String(image.original || '').trim() : '';
       const thumbnailUrl = image ? String(image.thumbnail || '').trim() : '';
-      const resolvedUrl = articleUrl || originalUrl;
+      const chunkUrl = card && card.image_chunk && typeof card.image_chunk === 'object'
+        ? String(card.image_chunk.imageUrl || '').trim()
+        : '';
+      const resolvedUrl = articleUrl || originalUrl || thumbnailUrl || chunkUrl;
       if (!resolvedUrl) return;
       const sourceInfo = {
         href: resolvedUrl,
@@ -1139,7 +1312,11 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
       };
       [
         originalUrl,
+        thumbnailUrl,
+        chunkUrl,
         normalizeRenderedImageUrl(originalUrl),
+        normalizeRenderedImageUrl(thumbnailUrl),
+        normalizeRenderedImageUrl(chunkUrl),
         articleUrl
       ]
         .filter(Boolean)
@@ -1531,7 +1708,7 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
           ? `<a class="message-image-source" href="${sourceHref}" target="_blank" rel="noopener noreferrer" title="${sourceHref}">${sourceLabel}</a>`
           : '';
         const fallbackAttr = fallbackSrc ? ` data-fallback-src="${fallbackSrc}"` : '';
-        return `<figure class="message-image-card"><img src="${safeUrl}" alt="${safeAlt}" loading="lazy" referrerpolicy="no-referrer" crossorigin="anonymous"${fallbackAttr}>${sourceBadge}${caption}</figure>`;
+        return `<figure class="message-image-card"><img src="${safeUrl}" alt="${safeAlt}" loading="lazy"${fallbackAttr}>${sourceBadge}${caption}</figure>`;
       });
 
       output = output.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, url) => {
@@ -2590,6 +2767,9 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
     if (!sessionId || !sessionsData || !messageId) return;
     const session = sessionsData.sessions.find((s) => s.id === sessionId);
     if (!session) return;
+    if (!Array.isArray(session.messages)) {
+      session.messages = [];
+    }
     const nextMessage = {
       id: messageId,
       role: 'assistant',
@@ -2597,7 +2777,10 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
       sources: assistantSources || null,
       rendering: assistantRendering || null,
       committed: Boolean(committed),
-      draftState: committed ? null : (draftState || null)
+      draftState: committed ? null : (draftState || null),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      order: getMessageOrderBase(session)
     };
     const existingIndex = session.messages.findIndex((item) => item && item.role === 'assistant' && item.id === messageId);
     if (existingIndex >= 0) {
@@ -2608,16 +2791,19 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
     } else {
       session.messages.push(nextMessage);
     }
-    if (session.messages.length > MAX_CONTEXT_MESSAGES) {
-      session.messages = session.messages.slice(-MAX_CONTEXT_MESSAGES);
-    }
+    session.messages = normalizeRuntimeMessages(session.messages);
+    session.messagesLoaded = true;
     session.updatedAt = Date.now();
     updateSessionTitle(session);
     if (sessionsData.activeId === sessionId) {
-      messageHistory = session.messages.slice();
-      trimMessageHistory();
+      messageHistory = cloneMessages(session.messages);
     } else {
       session.unread = true;
+    }
+    const storedMessage = session.messages.find((item) => item && item.id === messageId);
+    persistSessionMeta(session);
+    if (storedMessage) {
+      persistMessageRecord(sessionId, storedMessage, existingIndex >= 0 ? storedMessage.order : session.messages.length - 1);
     }
     saveSessions();
     renderSessionList();
@@ -3825,13 +4011,24 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
       content = blocks;
     }
 
-    messageHistory.push({ role: 'user', content });
-    trimMessageHistory();
+    const activeSession = getActiveSession();
+    const nextOrder = getMessageOrderBase(activeSession);
+    const userMessage = normalizeRuntimeMessage({
+      id: generateId(),
+      role: 'user',
+      content,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      order: nextOrder
+    }, nextOrder);
+    messageHistory.push(userMessage);
     if (promptInput) promptInput.value = '';
     clearAttachment();
     syncCurrentSession();
     syncSessionModel();
     updateSessionTitle(getActiveSession());
+    persistMessageRecord(sessionsData ? sessionsData.activeId : '', userMessage, nextOrder);
+    persistSessionMeta(getActiveSession());
     saveSessions();
     renderSessionList();
 

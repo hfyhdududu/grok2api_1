@@ -49,5 +49,7 @@ describe('renderLiteMarkdown', () => {
     const html = renderLiteMarkdown('![demo](https://example.com/demo.png)');
     expect(html).toContain('class="message-image-card');
     expect(html).toContain('src="https://example.com/demo.png"');
+    expect(html).not.toContain('crossorigin');
+    expect(html).not.toContain('referrerpolicy');
   });
 });

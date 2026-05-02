@@ -75,7 +75,7 @@ function parseRenderingCards(rendering) {
 function buildCardItem(card, fallbackKey = '') {
   const image = card && card.image && typeof card.image === 'object' ? card.image : null;
   const chunk = card && card.image_chunk && typeof card.image_chunk === 'object' ? card.image_chunk : null;
-  const rawSrc = String((image && (image.original || image.link || image.thumbnail)) || (chunk && chunk.imageUrl) || '').trim();
+  const rawSrc = String((image && (image.original || image.thumbnail)) || (chunk && chunk.imageUrl) || '').trim();
   const src = normalizeMediaUrl(rawSrc);
   if (!src) return null;
   const sourceHref = normalizeHttpUrl((image && (image.link || image.original)) || '');

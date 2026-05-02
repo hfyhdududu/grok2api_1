@@ -65,7 +65,7 @@
   function buildCardItem(card, fallbackKey = "") {
     const image = card && card.image && typeof card.image === "object" ? card.image : null;
     const chunk = card && card.image_chunk && typeof card.image_chunk === "object" ? card.image_chunk : null;
-    const rawSrc = String(image && (image.original || image.link || image.thumbnail) || chunk && chunk.imageUrl || "").trim();
+    const rawSrc = String(image && (image.original || image.thumbnail) || chunk && chunk.imageUrl || "").trim();
     const src = normalizeMediaUrl(rawSrc);
     if (!src) return null;
     const sourceHref = normalizeHttpUrl(image && (image.link || image.original) || "");
@@ -2606,7 +2606,7 @@
       const safeUrl = escapeHtml(String(url || "").trim());
       const safeAlt = escapeHtml(String(alt || "image").trim() || "image");
       if (!safeUrl) return "";
-      return `<figure class="message-image-card stream-lite-image-card"><img src="${safeUrl}" alt="${safeAlt}" loading="lazy" referrerpolicy="no-referrer" crossorigin="anonymous"></figure>`;
+      return `<figure class="message-image-card stream-lite-image-card"><img src="${safeUrl}" alt="${safeAlt}" loading="lazy"></figure>`;
     }));
     const normalizedParagraphs = withImages.split(/\n{2,}/);
     return normalizedParagraphs.map((paragraph) => {
@@ -2739,10 +2739,10 @@
     if (!(img instanceof HTMLImageElement)) {
       img = document.createElement("img");
       img.loading = "lazy";
-      img.referrerPolicy = "no-referrer";
-      img.crossOrigin = "anonymous";
       node.insertBefore(img, node.firstChild);
     }
+    img.removeAttribute("referrerpolicy");
+    img.removeAttribute("crossorigin");
     if (img.getAttribute("src") !== item.src) {
       img.setAttribute("src", item.src);
     }
@@ -2993,6 +2993,271 @@
     }
   };
 
+  // app/static/public/src/chat/chat_session_store.js
+  function promisifyRequest(request) {
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("IndexedDB \u8BF7\u6C42\u5931\u8D25"));
+    });
+  }
+  function waitForTransaction(transaction) {
+    return new Promise((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error || new Error("IndexedDB \u4E8B\u52A1\u5931\u8D25"));
+      transaction.onabort = () => reject(transaction.error || new Error("IndexedDB \u4E8B\u52A1\u5DF2\u4E2D\u6B62"));
+    });
+  }
+  function normalizeSessionMeta(session) {
+    if (!session || typeof session !== "object") return null;
+    return {
+      id: String(session.id || ""),
+      title: String(session.title || "\u65B0\u4F1A\u8BDD"),
+      model: String(session.model || ""),
+      createdAt: Number(session.createdAt || 0) || Date.now(),
+      updatedAt: Number(session.updatedAt || 0) || Date.now(),
+      isDefaultTitle: session.isDefaultTitle !== false,
+      unread: Boolean(session.unread)
+    };
+  }
+  function normalizeStoredMessage(sessionId, message, index = 0) {
+    if (!message || typeof message !== "object") return null;
+    const id = String(message.id || `${sessionId}-message-${index + 1}`);
+    const createdAt = Number(message.createdAt || message.updatedAt || 0) || Date.now();
+    const order = Number(message.order);
+    return {
+      ...message,
+      id,
+      sessionId,
+      createdAt,
+      updatedAt: Number(message.updatedAt || createdAt) || createdAt,
+      order: Number.isFinite(order) ? order : index,
+      role: String(message.role || "assistant")
+    };
+  }
+  function createChatSessionStore(options = {}) {
+    const {
+      dbName = "grok2api-chat-db",
+      dbVersion = 1
+    } = options;
+    let dbPromise = null;
+    async function openDatabase() {
+      if (dbPromise) return dbPromise;
+      dbPromise = new Promise((resolve, reject) => {
+        if (typeof indexedDB === "undefined") {
+          reject(new Error("\u5F53\u524D\u73AF\u5883\u4E0D\u652F\u6301 IndexedDB"));
+          return;
+        }
+        const request = indexedDB.open(dbName, dbVersion);
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains("sessions")) {
+            const sessionsStore = db.createObjectStore("sessions", { keyPath: "id" });
+            sessionsStore.createIndex("updatedAt", "updatedAt");
+          }
+          if (!db.objectStoreNames.contains("messages")) {
+            const messagesStore = db.createObjectStore("messages", { keyPath: "id" });
+            messagesStore.createIndex("sessionId", "sessionId");
+            messagesStore.createIndex("sessionIdOrder", ["sessionId", "order"]);
+          }
+          if (!db.objectStoreNames.contains("meta")) {
+            db.createObjectStore("meta", { keyPath: "key" });
+          }
+        };
+        request.onsuccess = () => {
+          const db = request.result;
+          db.onversionchange = () => {
+            db.close();
+            dbPromise = null;
+          };
+          resolve(db);
+        };
+        request.onerror = () => {
+          dbPromise = null;
+          reject(request.error || new Error("\u6253\u5F00 IndexedDB \u5931\u8D25"));
+        };
+      });
+      return dbPromise;
+    }
+    async function withTransaction(storeNames, mode, runner) {
+      const db = await openDatabase();
+      const transaction = db.transaction(storeNames, mode);
+      const result = await runner(transaction);
+      await waitForTransaction(transaction);
+      return result;
+    }
+    async function getMeta(key) {
+      return withTransaction(["meta"], "readonly", async (transaction) => {
+        const record = await promisifyRequest(transaction.objectStore("meta").get(key));
+        return record ? record.value : null;
+      });
+    }
+    async function setMeta(key, value) {
+      return withTransaction(["meta"], "readwrite", async (transaction) => {
+        transaction.objectStore("meta").put({ key, value });
+      });
+    }
+    async function getAllSessions() {
+      return withTransaction(["sessions"], "readonly", async (transaction) => {
+        const rows = await promisifyRequest(transaction.objectStore("sessions").getAll());
+        return Array.isArray(rows) ? rows.map((row) => normalizeSessionMeta(row)).filter(Boolean).sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0)) : [];
+      });
+    }
+    async function saveSession(session) {
+      const normalized = normalizeSessionMeta(session);
+      if (!normalized || !normalized.id) return;
+      return withTransaction(["sessions"], "readwrite", async (transaction) => {
+        transaction.objectStore("sessions").put(normalized);
+      });
+    }
+    async function saveSessions(sessions) {
+      const rows = Array.isArray(sessions) ? sessions.map((item) => normalizeSessionMeta(item)).filter(Boolean) : [];
+      return withTransaction(["sessions"], "readwrite", async (transaction) => {
+        const store = transaction.objectStore("sessions");
+        rows.forEach((row) => {
+          if (row.id) store.put(row);
+        });
+      });
+    }
+    async function getSessionMessages(sessionId) {
+      return withTransaction(["messages"], "readonly", async (transaction) => {
+        const store = transaction.objectStore("messages");
+        const rows = await promisifyRequest(store.index("sessionId").getAll(sessionId));
+        rows.sort((a, b) => Number(a.order || 0) - Number(b.order || 0));
+        return Array.isArray(rows) ? rows.map((row, index) => normalizeStoredMessage(sessionId, row, index)).filter(Boolean) : [];
+      });
+    }
+    async function saveMessage(sessionId, message, orderHint = 0) {
+      const normalized = normalizeStoredMessage(sessionId, message, orderHint);
+      if (!normalized || !normalized.id) return;
+      return withTransaction(["messages"], "readwrite", async (transaction) => {
+        transaction.objectStore("messages").put(normalized);
+      });
+    }
+    async function saveMessages(sessionId, messages) {
+      const rows = Array.isArray(messages) ? messages.map((item, index) => normalizeStoredMessage(sessionId, item, index)).filter(Boolean) : [];
+      return withTransaction(["messages"], "readwrite", async (transaction) => {
+        const store = transaction.objectStore("messages");
+        rows.forEach((row) => {
+          store.put(row);
+        });
+      });
+    }
+    async function deleteSessionMessages(sessionId) {
+      return withTransaction(["messages"], "readwrite", async (transaction) => {
+        const store = transaction.objectStore("messages");
+        const index = store.index("sessionId");
+        await new Promise((resolve, reject) => {
+          const request = index.openKeyCursor(IDBKeyRange.only(sessionId));
+          request.onsuccess = () => {
+            const cursor = request.result;
+            if (!cursor) {
+              resolve();
+              return;
+            }
+            store.delete(cursor.primaryKey);
+            cursor.continue();
+          };
+          request.onerror = () => reject(request.error || new Error("\u5220\u9664\u4F1A\u8BDD\u6D88\u606F\u5931\u8D25"));
+        });
+      });
+    }
+    async function deleteSession(sessionId) {
+      return withTransaction(["sessions", "messages"], "readwrite", async (transaction) => {
+        transaction.objectStore("sessions").delete(sessionId);
+        const store = transaction.objectStore("messages");
+        const index = store.index("sessionId");
+        await new Promise((resolve, reject) => {
+          const request = index.openKeyCursor(IDBKeyRange.only(sessionId));
+          request.onsuccess = () => {
+            const cursor = request.result;
+            if (!cursor) {
+              resolve();
+              return;
+            }
+            store.delete(cursor.primaryKey);
+            cursor.continue();
+          };
+          request.onerror = () => reject(request.error || new Error("\u5220\u9664\u4F1A\u8BDD\u5931\u8D25"));
+        });
+      });
+    }
+    async function importLegacySnapshot(snapshot) {
+      const sessions = Array.isArray(snapshot && snapshot.sessions) ? snapshot.sessions : [];
+      const activeId = String(snapshot && snapshot.activeId || "");
+      return withTransaction(["sessions", "messages", "meta"], "readwrite", async (transaction) => {
+        const sessionsStore = transaction.objectStore("sessions");
+        const messagesStore = transaction.objectStore("messages");
+        const metaStore = transaction.objectStore("meta");
+        sessions.forEach((session, sessionIndex) => {
+          const normalizedSession = normalizeSessionMeta(session);
+          if (!normalizedSession || !normalizedSession.id) return;
+          sessionsStore.put(normalizedSession);
+          const messages = Array.isArray(session.messages) ? session.messages : [];
+          messages.forEach((message, messageIndex) => {
+            const normalizedMessage = normalizeStoredMessage(normalizedSession.id, message, messageIndex);
+            if (!normalizedMessage) return;
+            if (!Number.isFinite(normalizedMessage.order)) {
+              normalizedMessage.order = messageIndex;
+            }
+            if (!normalizedMessage.createdAt) {
+              normalizedMessage.createdAt = normalizedSession.createdAt + messageIndex;
+            }
+            if (!normalizedMessage.updatedAt) {
+              normalizedMessage.updatedAt = normalizedMessage.createdAt;
+            }
+            messagesStore.put(normalizedMessage);
+          });
+        });
+        metaStore.put({ key: "activeSessionId", value: activeId });
+        metaStore.put({ key: "schemaVersion", value: dbVersion });
+        metaStore.put({ key: "legacyMigratedAt", value: Date.now() });
+      });
+    }
+    async function getState() {
+      const [activeId, sessions] = await Promise.all([
+        getMeta("activeSessionId"),
+        getAllSessions()
+      ]);
+      return {
+        activeId: typeof activeId === "string" ? activeId : "",
+        sessions
+      };
+    }
+    async function requestPersistentStorage() {
+      if (!navigator.storage || typeof navigator.storage.persist !== "function") return false;
+      try {
+        return await navigator.storage.persist();
+      } catch (error) {
+        return false;
+      }
+    }
+    async function estimateStorage() {
+      if (!navigator.storage || typeof navigator.storage.estimate !== "function") return null;
+      try {
+        return await navigator.storage.estimate();
+      } catch (error) {
+        return null;
+      }
+    }
+    return {
+      openDatabase,
+      getMeta,
+      setMeta,
+      getAllSessions,
+      getState,
+      saveSession,
+      saveSessions,
+      getSessionMessages,
+      saveMessage,
+      saveMessages,
+      deleteSessionMessages,
+      deleteSession,
+      importLegacySnapshot,
+      requestPersistentStorage,
+      estimateStorage
+    };
+  }
+
   // app/static/public/js/chat.js
   (() => {
     const modelSelect = document.getElementById("modelSelect");
@@ -3042,8 +3307,9 @@
     const STORAGE_KEY = "grok2api_chat_sessions";
     const SESSION_STORAGE_FALLBACK_KEY = "grok2api_chat_sessions_fallback";
     const SIDEBAR_STATE_KEY = "grok2api_chat_sidebar_collapsed";
-    const MAX_CONTEXT_MESSAGES = 30;
-    const MAX_PERSIST_SESSIONS = 12;
+    const ACTIVE_SESSION_STORAGE_KEY = "grok2api_chat_active_session_id";
+    const LEGACY_MIGRATED_KEY = "grok2api_chat_sessions_migrated";
+    const STORAGE_SCHEMA_VERSION = 1;
     const AUTO_SCROLL_THRESHOLD = 48;
     const STREAM_RENDER_INTERVAL_MS = 96;
     const STREAM_PERSIST_INTERVAL_MS = 320;
@@ -3051,6 +3317,9 @@
     const SEND_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"></path><path d="M22 2L15 22L11 13L2 9L22 2Z"></path></svg>';
     const STOP_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"></rect></svg>';
     let lastStorageErrorToastAt = 0;
+    const chatSessionStore = createChatSessionStore({ dbVersion: STORAGE_SCHEMA_VERSION });
+    let storageQueue = Promise.resolve();
+    let storageFallbackMode = false;
     function generateId() {
       return crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
     }
@@ -3177,25 +3446,11 @@
       };
       return serialized;
     }
-    function buildSessionSnapshot(limitSessions = MAX_PERSIST_SESSIONS, activeOnly = false) {
+    function buildSessionSnapshot(activeOnly = false) {
       if (!sessionsData) return null;
       const sourceSessions = Array.isArray(sessionsData.sessions) ? sessionsData.sessions.slice() : [];
       sourceSessions.sort((a, b) => Number(b && b.updatedAt || 0) - Number(a && a.updatedAt || 0));
-      let picked = sourceSessions;
-      if (activeOnly) {
-        picked = sourceSessions.filter((session) => session && session.id === sessionsData.activeId);
-      } else if (limitSessions > 0 && sourceSessions.length > limitSessions) {
-        const activeId = sessionsData.activeId;
-        const selected = sourceSessions.slice(0, limitSessions);
-        if (activeId && !selected.some((session) => session && session.id === activeId)) {
-          const activeSession = sourceSessions.find((session) => session && session.id === activeId);
-          if (activeSession) {
-            selected.pop();
-            selected.push(activeSession);
-          }
-        }
-        picked = selected;
-      }
+      const picked = activeOnly ? sourceSessions.filter((session) => session && session.id === sessionsData.activeId) : sourceSessions;
       return {
         activeId: sessionsData.activeId,
         sessions: picked.map((session) => ({
@@ -3208,7 +3463,7 @@
       const now = Date.now();
       if (now - lastStorageErrorToastAt < 2500) return;
       lastStorageErrorToastAt = now;
-      toast("\u4F1A\u8BDD\u4FDD\u5B58\u5931\u8D25\uFF0C\u5DF2\u81EA\u52A8\u7CBE\u7B80\u672C\u5730\u7F13\u5B58", "error");
+      toast("\u4F1A\u8BDD\u4FDD\u5B58\u5931\u8D25\uFF0C\u5DF2\u5207\u6362\u5230\u4E34\u65F6\u6062\u590D\u6A21\u5F0F", "error");
     }
     function saveFallbackSession(snapshot) {
       if (!snapshot) return false;
@@ -3225,58 +3480,164 @@
       } catch (e) {
       }
     }
-    function saveSessions() {
-      if (!sessionsData) return;
-      const attempts = [
-        buildSessionSnapshot(MAX_PERSIST_SESSIONS, false),
-        buildSessionSnapshot(6, false),
-        buildSessionSnapshot(1, true)
-      ].filter(Boolean);
+    function cloneMessages(messages) {
+      return Array.isArray(messages) ? messages.map((item) => ({ ...item })) : [];
+    }
+    function normalizeRuntimeMessage(message, index = 0) {
+      if (!message || typeof message !== "object") return message;
+      const createdAt = Number(message.createdAt || message.updatedAt || 0) || Date.now() + index;
+      const updatedAt = Number(message.updatedAt || createdAt) || createdAt;
+      const order = Number(message.order);
+      return {
+        ...message,
+        id: String(message.id || generateId()),
+        createdAt,
+        updatedAt,
+        order: Number.isFinite(order) ? order : index
+      };
+    }
+    function normalizeRuntimeMessages(messages) {
+      return Array.isArray(messages) ? messages.map((item, index) => normalizeRuntimeMessage(item, index)).filter(Boolean) : [];
+    }
+    function buildSessionMeta(session) {
+      if (!session || typeof session !== "object") return null;
+      return {
+        id: session.id,
+        title: session.title || "\u65B0\u4F1A\u8BDD",
+        model: session.model || "",
+        createdAt: Number(session.createdAt || 0) || Date.now(),
+        updatedAt: Number(session.updatedAt || 0) || Date.now(),
+        isDefaultTitle: session.isDefaultTitle !== false,
+        unread: Boolean(session.unread)
+      };
+    }
+    function setActiveSessionHint(sessionId) {
       try {
-        let saved = false;
-        for (const snapshot of attempts) {
-          try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
-            clearFallbackSession();
-            saved = true;
-            break;
-          } catch (e) {
-          }
-        }
-        if (!saved) {
-          const fallbackSnapshot = buildSessionSnapshot(1, true);
-          if (!saveFallbackSession(fallbackSnapshot)) {
-            notifyStorageFailure();
-          }
-        }
+        localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, sessionId || "");
       } catch (e) {
-        const fallbackSnapshot = buildSessionSnapshot(1, true);
+      }
+    }
+    function clearLegacySessionSnapshot() {
+      try {
+        localStorage.removeItem(STORAGE_KEY);
+        localStorage.setItem(LEGACY_MIGRATED_KEY, "1");
+      } catch (e) {
+      }
+      clearFallbackSession();
+    }
+    function enqueueStorageWork(work) {
+      storageQueue = storageQueue.then(() => work()).catch((error) => {
+        storageFallbackMode = true;
+        const fallbackSnapshot = buildSessionSnapshot(true);
         if (!saveFallbackSession(fallbackSnapshot)) {
           notifyStorageFailure();
         }
+        console.warn("chat session storage failed", error);
+      });
+      return storageQueue;
+    }
+    function persistSessionMeta(session) {
+      const meta = buildSessionMeta(session);
+      if (!meta || !meta.id || storageFallbackMode) return;
+      void enqueueStorageWork(async () => {
+        await chatSessionStore.saveSession(meta);
+      });
+    }
+    function persistMessageRecord(sessionId, message, orderHint = 0) {
+      if (!sessionId || !message || storageFallbackMode) return;
+      const normalized = serializeMessage(normalizeRuntimeMessage(message, orderHint));
+      void enqueueStorageWork(async () => {
+        await chatSessionStore.saveMessage(sessionId, normalized, orderHint);
+      });
+    }
+    function persistSessionMessages(session) {
+      if (!session || !session.id || storageFallbackMode) return;
+      const normalizedMessages = normalizeRuntimeMessages(session.messages).map((message) => serializeMessage(message));
+      void enqueueStorageWork(async () => {
+        await chatSessionStore.saveMessages(session.id, normalizedMessages);
+      });
+    }
+    function saveSessions() {
+      if (!sessionsData) return;
+      const sessionMetas = Array.isArray(sessionsData.sessions) ? sessionsData.sessions.map((session) => buildSessionMeta(session)).filter(Boolean) : [];
+      setActiveSessionHint(sessionsData.activeId || "");
+      if (storageFallbackMode) {
+        const fallbackSnapshot = buildSessionSnapshot(true);
+        if (!saveFallbackSession(fallbackSnapshot)) {
+          notifyStorageFailure();
+        }
+        return;
       }
+      void enqueueStorageWork(async () => {
+        await chatSessionStore.saveSessions(sessionMetas);
+        await chatSessionStore.setMeta("activeSessionId", sessionsData.activeId || "");
+        await chatSessionStore.setMeta("schemaVersion", STORAGE_SCHEMA_VERSION);
+        clearFallbackSession();
+        clearLegacySessionSnapshot();
+      });
+    }
+    async function readLegacySnapshot() {
+      let snapshot = null;
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) snapshot = JSON.parse(raw);
+      } catch (e) {
+        snapshot = null;
+      }
+      if (!snapshot) {
+        try {
+          const fallbackRaw = sessionStorage.getItem(SESSION_STORAGE_FALLBACK_KEY);
+          if (fallbackRaw) snapshot = JSON.parse(fallbackRaw);
+        } catch (e) {
+          snapshot = null;
+        }
+      }
+      if (!snapshot || !Array.isArray(snapshot.sessions) || !snapshot.sessions.length) return null;
+      snapshot.sessions = snapshot.sessions.map((session) => ({
+        ...session,
+        messages: normalizeRuntimeMessages(session.messages)
+      }));
+      return snapshot;
     }
     function getActiveSession() {
       if (!sessionsData) return null;
       return sessionsData.sessions.find((s) => s.id === sessionsData.activeId) || null;
     }
-    function trimMessageHistory(maxCount = MAX_CONTEXT_MESSAGES) {
-      if (!maxCount || maxCount <= 0) return;
-      if (messageHistory.length <= maxCount) return;
-      messageHistory = messageHistory.slice(-maxCount);
-      const session = getActiveSession();
-      if (session) {
-        session.messages = messageHistory.slice();
-        session.updatedAt = Date.now();
-        saveSessions();
-        renderSessionList();
+    async function ensureSessionMessagesLoaded(session) {
+      if (!session) return [];
+      if (session.messagesLoaded) {
+        if (!Array.isArray(session.messages)) session.messages = [];
+        return session.messages;
       }
+      if (storageFallbackMode) {
+        session.messages = normalizeRuntimeMessages(session.messages);
+        session.messagesLoaded = true;
+        return session.messages;
+      }
+      try {
+        const messages = await chatSessionStore.getSessionMessages(session.id);
+        session.messages = normalizeRuntimeMessages(messages);
+        session.messagesLoaded = true;
+        return session.messages;
+      } catch (e) {
+        console.warn("load session messages failed", e);
+        storageFallbackMode = true;
+        session.messages = normalizeRuntimeMessages(session.messages);
+        session.messagesLoaded = true;
+        return session.messages;
+      }
+    }
+    function getMessageOrderBase(session) {
+      if (!session || !Array.isArray(session.messages) || !session.messages.length) return 0;
+      return session.messages.reduce((maxOrder, message, index) => {
+        const candidate = Number(message && message.order);
+        return Number.isFinite(candidate) ? Math.max(maxOrder, candidate) : Math.max(maxOrder, index);
+      }, -1) + 1;
     }
     function restoreActiveSession() {
       const session = getActiveSession();
       if (!session) return;
-      messageHistory = Array.isArray(session.messages) ? session.messages.slice() : [];
-      trimMessageHistory();
+      messageHistory = normalizeRuntimeMessages(session.messages);
       if (chatLog) chatLog.innerHTML = "";
       if (!messageHistory.length) {
         showEmptyState();
@@ -3336,7 +3697,8 @@
     function syncCurrentSession() {
       const session = getActiveSession();
       if (!session) return;
-      session.messages = messageHistory.slice();
+      session.messages = normalizeRuntimeMessages(cloneMessages(messageHistory));
+      session.messagesLoaded = true;
       session.updatedAt = Date.now();
     }
     function updateSessionTitle(session) {
@@ -3443,7 +3805,8 @@
         isDefaultTitle: true,
         createdAt: Date.now(),
         updatedAt: Date.now(),
-        messages: []
+        messages: [],
+        messagesLoaded: true
       };
       sessionsData.sessions.unshift(session);
       sessionsData.activeId = id;
@@ -3527,6 +3890,7 @@
       const idx = sessionsData.sessions.findIndex((s) => s.id === id);
       if (idx === -1) return;
       const targetSession = sessionsData.sessions[idx];
+      await ensureSessionMessagesLoaded(targetSession);
       const cacheNames = collectChatUploadCacheNames(targetSession);
       try {
         await deleteChatUploadCache(cacheNames);
@@ -3534,6 +3898,11 @@
         console.warn("deleteSession cache cleanup failed", e);
       }
       sessionsData.sessions.splice(idx, 1);
+      if (!storageFallbackMode) {
+        void enqueueStorageWork(async () => {
+          await chatSessionStore.deleteSession(id);
+        });
+      }
       if (!sessionsData.sessions.length) {
         createSession();
         return;
@@ -3541,18 +3910,25 @@
       if (sessionsData.activeId === id) {
         const newIdx = Math.min(idx, sessionsData.sessions.length - 1);
         sessionsData.activeId = sessionsData.sessions[newIdx].id;
+        await ensureSessionMessagesLoaded(sessionsData.sessions[newIdx]);
         restoreActiveSession();
         restoreSessionModel();
       }
       saveSessions();
       renderSessionList();
     }
-    function switchSession(id) {
+    async function switchSession(id) {
       if (!sessionsData || sessionsData.activeId === id) return;
       syncCurrentSession();
+      const previousSession = getActiveSession();
+      if (previousSession) {
+        persistSessionMeta(previousSession);
+        persistSessionMessages(previousSession);
+      }
       syncSessionModel();
       sessionsData.activeId = id;
       const target = getActiveSession();
+      await ensureSessionMessagesLoaded(target);
       if (target) target.unread = false;
       restoreActiveSession();
       restoreSessionModel();
@@ -3608,34 +3984,48 @@
       } catch (e) {
       }
     }
-    function loadSessions() {
+    async function loadSessions() {
+      let state = null;
       try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) {
-          sessionsData = JSON.parse(raw);
-          if (!sessionsData || !Array.isArray(sessionsData.sessions)) {
-            sessionsData = null;
+        await chatSessionStore.openDatabase();
+        await Promise.all([
+          chatSessionStore.requestPersistentStorage(),
+          chatSessionStore.estimateStorage()
+        ]);
+        state = await chatSessionStore.getState();
+        if (!state.sessions.length) {
+          const legacySnapshot = await readLegacySnapshot();
+          if (legacySnapshot) {
+            await chatSessionStore.importLegacySnapshot(legacySnapshot);
+            clearLegacySessionSnapshot();
+            state = {
+              activeId: legacySnapshot.activeId,
+              sessions: legacySnapshot.sessions.map((session) => ({
+                ...buildSessionMeta(session),
+                messages: session.messages,
+                messagesLoaded: true
+              }))
+            };
           }
         }
       } catch (e) {
-        sessionsData = null;
-      }
-      if (!sessionsData) {
-        try {
-          const fallbackRaw = sessionStorage.getItem(SESSION_STORAGE_FALLBACK_KEY);
-          if (fallbackRaw) {
-            sessionsData = JSON.parse(fallbackRaw);
-            if (!sessionsData || !Array.isArray(sessionsData.sessions)) {
-              sessionsData = null;
-            }
-          }
-        } catch (e) {
-          sessionsData = null;
+        console.warn("load IndexedDB sessions failed", e);
+        storageFallbackMode = true;
+        const legacySnapshot = await readLegacySnapshot();
+        if (legacySnapshot) {
+          state = {
+            activeId: legacySnapshot.activeId,
+            sessions: legacySnapshot.sessions.map((session) => ({
+              ...buildSessionMeta(session),
+              messages: normalizeRuntimeMessages(session.messages),
+              messagesLoaded: true
+            }))
+          };
         }
       }
-      if (!sessionsData || !sessionsData.sessions.length) {
+      if (!state || !Array.isArray(state.sessions) || !state.sessions.length) {
         const id = generateId();
-        sessionsData = {
+        state = {
           activeId: id,
           sessions: [{
             id,
@@ -3643,25 +4033,46 @@
             isDefaultTitle: true,
             createdAt: Date.now(),
             updatedAt: Date.now(),
-            messages: []
+            model: "",
+            unread: false,
+            messages: [],
+            messagesLoaded: true
           }]
         };
-        saveSessions();
       }
-      sessionsData.sessions.forEach((session) => {
-        if (session && typeof session.isDefaultTitle === "undefined") {
-          session.isDefaultTitle = isDefaultTitleValue(session.title);
+      sessionsData = {
+        activeId: state.activeId,
+        sessions: state.sessions.map((session) => ({
+          id: session.id,
+          title: session.title || "\u65B0\u4F1A\u8BDD",
+          model: session.model || "",
+          isDefaultTitle: typeof session.isDefaultTitle === "undefined" ? isDefaultTitleValue(session.title) : session.isDefaultTitle !== false,
+          createdAt: Number(session.createdAt || 0) || Date.now(),
+          updatedAt: Number(session.updatedAt || 0) || Date.now(),
+          unread: Boolean(session.unread),
+          messages: normalizeRuntimeMessages(session.messages),
+          messagesLoaded: Boolean(session.messagesLoaded)
+        }))
+      };
+      if (!sessionsData.activeId || !sessionsData.sessions.find((s) => s.id === sessionsData.activeId)) {
+        try {
+          const hinted = localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+          if (hinted && sessionsData.sessions.find((s) => s.id === hinted)) {
+            sessionsData.activeId = hinted;
+          }
+        } catch (e) {
+          sessionsData.activeId = sessionsData.sessions[0].id;
         }
-        if (!Array.isArray(session.messages)) {
-          session.messages = [];
-        }
-      });
+      }
       if (!sessionsData.activeId || !sessionsData.sessions.find((s) => s.id === sessionsData.activeId)) {
         sessionsData.activeId = sessionsData.sessions[0].id;
       }
+      const activeSession = getActiveSession();
+      await ensureSessionMessagesLoaded(activeSession);
       restoreActiveSession();
       restoreSessionModel();
       renderSessionList();
+      saveSessions();
     }
     function toast(message, type) {
       if (typeof showToast === "function") {
@@ -3963,7 +4374,7 @@
     }
     function buildRenderedImageMarkdown(card) {
       let image = card && card.image && typeof card.image === "object" ? card.image : null;
-      let original = image ? String(image.original || image.link || "").trim() : "";
+      let original = image ? String(image.original || image.thumbnail || "").trim() : "";
       let title = image ? normalizeSourceText2(image.title || "") : "";
       if (!original && card && card.image_chunk) {
         original = String(card.image_chunk.imageUrl || "").trim();
@@ -3989,7 +4400,8 @@
         const articleUrl = image ? String(image.link || "").trim() : "";
         const originalUrl = image ? String(image.original || "").trim() : "";
         const thumbnailUrl = image ? String(image.thumbnail || "").trim() : "";
-        const resolvedUrl = articleUrl || originalUrl;
+        const chunkUrl = card && card.image_chunk && typeof card.image_chunk === "object" ? String(card.image_chunk.imageUrl || "").trim() : "";
+        const resolvedUrl = articleUrl || originalUrl || thumbnailUrl || chunkUrl;
         if (!resolvedUrl) return;
         const sourceInfo = {
           href: resolvedUrl,
@@ -3998,7 +4410,11 @@
         };
         [
           originalUrl,
+          thumbnailUrl,
+          chunkUrl,
           normalizeRenderedImageUrl(originalUrl),
+          normalizeRenderedImageUrl(thumbnailUrl),
+          normalizeRenderedImageUrl(chunkUrl),
           articleUrl
         ].filter(Boolean).forEach((candidate) => {
           sourceMap.set(String(candidate), sourceInfo);
@@ -4323,7 +4739,7 @@ ${renderedAnswer}`.trim();
           const caption = mergedAlt && mergedAlt !== "image" ? `<figcaption class="message-image-caption">${escapeHtml2(mergedAlt)}</figcaption>` : "";
           const sourceBadge = sourceLabel ? `<a class="message-image-source" href="${sourceHref}" target="_blank" rel="noopener noreferrer" title="${sourceHref}">${sourceLabel}</a>` : "";
           const fallbackAttr = fallbackSrc ? ` data-fallback-src="${fallbackSrc}"` : "";
-          return `<figure class="message-image-card"><img src="${safeUrl}" alt="${safeAlt}" loading="lazy" referrerpolicy="no-referrer" crossorigin="anonymous"${fallbackAttr}>${sourceBadge}${caption}</figure>`;
+          return `<figure class="message-image-card"><img src="${safeUrl}" alt="${safeAlt}" loading="lazy"${fallbackAttr}>${sourceBadge}${caption}</figure>`;
         });
         output2 = output2.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, url) => {
           const safeLabel = escapeHtml2(decodeHtmlEntities(label || ""));
@@ -5301,6 +5717,9 @@ ${renderedAnswer}`.trim();
       if (!sessionId || !sessionsData || !messageId) return;
       const session = sessionsData.sessions.find((s) => s.id === sessionId);
       if (!session) return;
+      if (!Array.isArray(session.messages)) {
+        session.messages = [];
+      }
       const nextMessage = {
         id: messageId,
         role: "assistant",
@@ -5308,7 +5727,10 @@ ${renderedAnswer}`.trim();
         sources: assistantSources || null,
         rendering: assistantRendering || null,
         committed: Boolean(committed),
-        draftState: committed ? null : draftState || null
+        draftState: committed ? null : draftState || null,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        order: getMessageOrderBase(session)
       };
       const existingIndex = session.messages.findIndex((item) => item && item.role === "assistant" && item.id === messageId);
       if (existingIndex >= 0) {
@@ -5319,16 +5741,19 @@ ${renderedAnswer}`.trim();
       } else {
         session.messages.push(nextMessage);
       }
-      if (session.messages.length > MAX_CONTEXT_MESSAGES) {
-        session.messages = session.messages.slice(-MAX_CONTEXT_MESSAGES);
-      }
+      session.messages = normalizeRuntimeMessages(session.messages);
+      session.messagesLoaded = true;
       session.updatedAt = Date.now();
       updateSessionTitle(session);
       if (sessionsData.activeId === sessionId) {
-        messageHistory = session.messages.slice();
-        trimMessageHistory();
+        messageHistory = cloneMessages(session.messages);
       } else {
         session.unread = true;
+      }
+      const storedMessage = session.messages.find((item) => item && item.id === messageId);
+      persistSessionMeta(session);
+      if (storedMessage) {
+        persistMessageRecord(sessionId, storedMessage, existingIndex >= 0 ? storedMessage.order : session.messages.length - 1);
       }
       saveSessions();
       renderSessionList();
@@ -6413,13 +6838,24 @@ ${renderedAnswer}`.trim();
         });
         content = blocks;
       }
-      messageHistory.push({ role: "user", content });
-      trimMessageHistory();
+      const activeSession = getActiveSession();
+      const nextOrder = getMessageOrderBase(activeSession);
+      const userMessage = normalizeRuntimeMessage({
+        id: generateId(),
+        role: "user",
+        content,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        order: nextOrder
+      }, nextOrder);
+      messageHistory.push(userMessage);
       if (promptInput) promptInput.value = "";
       clearAttachment();
       syncCurrentSession();
       syncSessionModel();
       updateSessionTitle(getActiveSession());
+      persistMessageRecord(sessionsData ? sessionsData.activeId : "", userMessage, nextOrder);
+      persistSessionMeta(getActiveSession());
       saveSessions();
       renderSessionList();
       const sendSessionId = sessionsData ? sessionsData.activeId : null;
