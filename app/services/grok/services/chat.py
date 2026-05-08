@@ -502,6 +502,40 @@ def _capture_app_chat_event(resp: Dict[str, Any], model: str, phase: str, seq: i
         )
 
 
+def _clean_id(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _provider_grok_options(provider_options: Dict[str, Any] | None) -> Dict[str, Any]:
+    if not isinstance(provider_options, dict):
+        return {}
+    grok = provider_options.get("grok")
+    if isinstance(grok, dict):
+        return grok
+    return provider_options
+
+
+def _conversation_reuse_enabled(provider_options: Dict[str, Any] | None) -> bool:
+    if not get_config("app.continue_conversation", get_config("app.reuse_grok_conversation", False)):
+        return False
+    opts = _provider_grok_options(provider_options)
+    if opts.get("reuse_conversation") is False:
+        return False
+    if opts.get("reuseConversation") is False:
+        return False
+    return True
+
+
+def _latest_user_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    system_messages = [
+        msg for msg in messages or [] if isinstance(msg, dict) and msg.get("role") == "system"
+    ]
+    for msg in reversed(messages or []):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            return system_messages + [msg]
+    return messages
+
+
 def _get_chat_semaphore() -> asyncio.Semaphore:
     global _CHAT_SEMAPHORE, _CHAT_SEM_VALUE
     value = max(1, int(get_config("chat.concurrent")))
@@ -559,8 +593,32 @@ class MessageExtractor:
                     elif item_type == "image_url":
                         image_data = item.get("image_url", {})
                         url = image_data.get("url", "")
-                        if url:
-                            image_attachments.append(url)
+                        file_id = _clean_id(
+                            image_data.get("grok_file_id")
+                            or image_data.get("file_id")
+                            or item.get("grok_file_id")
+                            or item.get("file_id")
+                        )
+                        if file_id:
+                            file_attachments.append(
+                                {
+                                    "file_id": file_id,
+                                    "attachmentId": item.get("attachmentId"),
+                                    "filename": item.get("name") or item.get("filename"),
+                                    "mime_type": item.get("mime"),
+                                    "size": item.get("size"),
+                                }
+                            )
+                        elif url:
+                            image_attachments.append(
+                                {
+                                    "data": url,
+                                    "attachmentId": item.get("attachmentId"),
+                                    "filename": item.get("name") or item.get("filename") or "image",
+                                    "mime_type": item.get("mime") or "image/jpeg",
+                                    "size": item.get("size"),
+                                }
+                            )
 
                     elif item_type == "input_audio":
                         audio_data = item.get("input_audio", {})
@@ -571,13 +629,30 @@ class MessageExtractor:
                     elif item_type == "file":
                         file_data = item.get("file", {})
                         raw = file_data.get("file_data", "")
-                        if raw:
+                        file_id = _clean_id(
+                            file_data.get("grok_file_id")
+                            or file_data.get("file_id")
+                            or item.get("grok_file_id")
+                            or item.get("file_id")
+                        )
+                        if file_id:
+                            file_attachments.append(
+                                {
+                                    "file_id": file_id,
+                                    "attachmentId": item.get("attachmentId"),
+                                    "filename": file_data.get("filename") or file_data.get("name"),
+                                    "mime_type": file_data.get("mime_type") or file_data.get("mime"),
+                                    "size": file_data.get("size"),
+                                }
+                            )
+                        elif raw:
                             file_attachments.append(
                                 {
                                     "data": raw,
                                     "filename": file_data.get("filename") or file_data.get("name"),
                                     "mime_type": file_data.get("mime_type") or file_data.get("mime"),
                                     "size": file_data.get("size"),
+                                    "attachmentId": item.get("attachmentId"),
                                 }
                             )
             elif isinstance(content, list):
@@ -591,8 +666,32 @@ class MessageExtractor:
                     elif item_type == "image_url":
                         image_data = item.get("image_url", {})
                         url = image_data.get("url", "")
-                        if url:
-                            image_attachments.append(url)
+                        file_id = _clean_id(
+                            image_data.get("grok_file_id")
+                            or image_data.get("file_id")
+                            or item.get("grok_file_id")
+                            or item.get("file_id")
+                        )
+                        if file_id:
+                            file_attachments.append(
+                                {
+                                    "file_id": file_id,
+                                    "attachmentId": item.get("attachmentId"),
+                                    "filename": item.get("name") or item.get("filename"),
+                                    "mime_type": item.get("mime"),
+                                    "size": item.get("size"),
+                                }
+                            )
+                        elif url:
+                            image_attachments.append(
+                                {
+                                    "data": url,
+                                    "attachmentId": item.get("attachmentId"),
+                                    "filename": item.get("name") or item.get("filename") or "image",
+                                    "mime_type": item.get("mime") or "image/jpeg",
+                                    "size": item.get("size"),
+                                }
+                            )
 
                     elif item_type == "input_audio":
                         audio_data = item.get("input_audio", {})
@@ -603,13 +702,30 @@ class MessageExtractor:
                     elif item_type == "file":
                         file_data = item.get("file", {})
                         raw = file_data.get("file_data", "")
-                        if raw:
+                        file_id = _clean_id(
+                            file_data.get("grok_file_id")
+                            or file_data.get("file_id")
+                            or item.get("grok_file_id")
+                            or item.get("file_id")
+                        )
+                        if file_id:
+                            file_attachments.append(
+                                {
+                                    "file_id": file_id,
+                                    "attachmentId": item.get("attachmentId"),
+                                    "filename": file_data.get("filename") or file_data.get("name"),
+                                    "mime_type": file_data.get("mime_type") or file_data.get("mime"),
+                                    "size": file_data.get("size"),
+                                }
+                            )
+                        elif raw:
                             file_attachments.append(
                                 {
                                     "data": raw,
                                     "filename": file_data.get("filename") or file_data.get("name"),
                                     "mime_type": file_data.get("mime_type") or file_data.get("mime"),
                                     "size": file_data.get("size"),
+                                    "attachmentId": item.get("attachmentId"),
                                 }
                             )
 
@@ -706,6 +822,8 @@ class GrokChatService:
         tool_overrides: Dict[str, Any] = None,
         model_config_override: Dict[str, Any] = None,
         image_generation_count: int | None = None,
+        conversation_id: str | None = None,
+        parent_response_id: str | None = None,
     ):
         """发送聊天请求"""
         if stream is None:
@@ -735,6 +853,8 @@ class GrokChatService:
                         tool_overrides=tool_overrides,
                         model_config_override=model_config_override,
                         image_generation_count=image_generation_count,
+                        conversation_id=conversation_id,
+                        parent_response_id=parent_response_id,
                     )
                     logger.info(
                         "Chat connected: "
@@ -765,6 +885,7 @@ class GrokChatService:
         tools: List[Dict[str, Any]] = None,
         tool_choice: Any = None,
         parallel_tool_calls: bool = True,
+        provider_options: Dict[str, Any] | None = None,
     ):
         """OpenAI 兼容接口"""
         model_info = ModelService.get(model)
@@ -773,9 +894,23 @@ class GrokChatService:
 
         grok_model = model_info.grok_model
         mode = model_info.model_mode
+        reuse_conversation = _conversation_reuse_enabled(provider_options)
+        grok_options = _provider_grok_options(provider_options)
+        conversation_id = _clean_id(
+            grok_options.get("conversation_id") or grok_options.get("conversationId")
+        ) if reuse_conversation else ""
+        parent_response_id = _clean_id(
+            grok_options.get("parent_response_id") or grok_options.get("parentResponseId")
+        ) if reuse_conversation else ""
+        effective_messages = (
+            _latest_user_messages(messages)
+            if reuse_conversation and conversation_id
+            else messages
+        )
+
         # 提取消息和附件
         message, file_attachments, image_attachments = MessageExtractor.extract(
-            messages,
+            effective_messages,
             tools=tools,
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
@@ -793,16 +928,47 @@ class GrokChatService:
         # 上传附件
         file_ids: List[str] = []
         image_ids: List[str] = []
+        uploaded_attachments: List[Dict[str, Any]] = []
         if file_attachments or image_attachments:
             upload_service = UploadService()
             try:
                 for attach_data in file_attachments:
-                    file_id, _ = await upload_service.upload_file(attach_data, token)
+                    existing_id = (
+                        _clean_id(attach_data.get("file_id"))
+                        if isinstance(attach_data, dict)
+                        else ""
+                    )
+                    if existing_id:
+                        file_ids.append(existing_id)
+                        continue
+                    file_id, file_uri = await upload_service.upload_file(attach_data, token)
                     file_ids.append(file_id)
+                    if isinstance(attach_data, dict) and attach_data.get("attachmentId"):
+                        uploaded_attachments.append(
+                            {
+                                "attachmentId": attach_data.get("attachmentId"),
+                                "fileId": file_id,
+                                "fileUri": file_uri,
+                                "name": attach_data.get("filename") or "",
+                                "mime": attach_data.get("mime_type") or "",
+                                "size": attach_data.get("size") or 0,
+                            }
+                        )
                     logger.debug(f"Attachment uploaded: type=file, file_id={file_id}")
                 for attach_data in image_attachments:
-                    file_id, _ = await upload_service.upload_file(attach_data, token)
+                    file_id, file_uri = await upload_service.upload_file(attach_data, token)
                     image_ids.append(file_id)
+                    if isinstance(attach_data, dict) and attach_data.get("attachmentId"):
+                        uploaded_attachments.append(
+                            {
+                                "attachmentId": attach_data.get("attachmentId"),
+                                "fileId": file_id,
+                                "fileUri": file_uri,
+                                "name": attach_data.get("filename") or "",
+                                "mime": attach_data.get("mime_type") or "",
+                                "size": attach_data.get("size") or 0,
+                            }
+                        )
                     logger.debug(f"Attachment uploaded: type=image, file_id={file_id}")
             finally:
                 await upload_service.close()
@@ -827,9 +993,18 @@ class GrokChatService:
             file_attachments=all_attachments,
             tool_overrides=None,
             model_config_override=model_config_override,
+            conversation_id=conversation_id,
+            parent_response_id=parent_response_id,
         )
 
-        return response, stream, model
+        request_metadata = {
+            "reuseConversation": bool(reuse_conversation),
+            "conversationId": conversation_id,
+            "parentResponseId": parent_response_id,
+            "uploadedAttachments": uploaded_attachments,
+        }
+
+        return response, stream, model, request_metadata
 
 
 class ChatService:
@@ -846,6 +1021,7 @@ class ChatService:
         tools: List[Dict[str, Any]] = None,
         tool_choice: Any = None,
         parallel_tool_calls: bool = True,
+        provider_options: Dict[str, Any] | None = None,
     ):
         """Chat Completions 入口"""
         # 获取 token
@@ -882,7 +1058,7 @@ class ChatService:
             try:
                 # 请求 Grok
                 service = GrokChatService()
-                response, _, model_name = await service.chat_openai(
+                response, _, model_name, request_metadata = await service.chat_openai(
                     token,
                     model,
                     messages,
@@ -893,6 +1069,7 @@ class ChatService:
                     tools=tools,
                     tool_choice=tool_choice,
                     parallel_tool_calls=parallel_tool_calls,
+                    provider_options=provider_options,
                 )
 
                 # 处理响应
@@ -904,6 +1081,7 @@ class ChatService:
                         show_think,
                         tools=tools,
                         tool_choice=tool_choice,
+                        request_metadata=request_metadata,
                     )
                     return wrap_stream_with_usage(
                         processor.process(response), token_mgr, token, model
@@ -916,6 +1094,7 @@ class ChatService:
                     token,
                     tools=tools,
                     tool_choice=tool_choice,
+                    request_metadata=request_metadata,
                 ).process(response)
                 try:
                     model_info = ModelService.get(model)
@@ -973,6 +1152,7 @@ class StreamProcessor(proc_base.BaseProcessor):
         show_think: bool = None,
         tools: List[Dict[str, Any]] = None,
         tool_choice: Any = None,
+        request_metadata: Dict[str, Any] | None = None,
     ):
         super().__init__(model, token)
         self.response_id: str = None
@@ -1003,6 +1183,22 @@ class StreamProcessor(proc_base.BaseProcessor):
         self._citation_sources: List[Dict[str, str]] = []
         self._image_sources: List[Dict[str, str]] = []
         self._capture_seq: int = 0
+        self._request_metadata = request_metadata if isinstance(request_metadata, dict) else {}
+        self._conversation_id = _clean_id(self._request_metadata.get("conversationId"))
+        self._parent_response_id = _clean_id(self._request_metadata.get("parentResponseId"))
+        self._request_parent_response_id = self._parent_response_id
+        self._emitted_answer_text = ""
+
+    def _grok_metadata(self, extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        payload = {
+            "reuseConversation": bool(self._request_metadata.get("reuseConversation")),
+            "conversationId": self._conversation_id,
+            "parentResponseId": self._parent_response_id,
+            "uploadedAttachments": self._request_metadata.get("uploadedAttachments") or [],
+        }
+        if extra:
+            payload.update(extra)
+        return payload
 
     def _filter_tool_card(self, token: str) -> str:
         if not token or not self.tool_usage_enabled:
@@ -1169,6 +1365,7 @@ class StreamProcessor(proc_base.BaseProcessor):
         tool_calls: list = None,
         sources: Dict[str, Any] = None,
         rendering: Dict[str, Any] = None,
+        grok: Dict[str, Any] = None,
     ) -> str:
         """Build SSE response."""
         delta = {}
@@ -1194,6 +1391,8 @@ class StreamProcessor(proc_base.BaseProcessor):
             chunk["sources"] = sources
         if rendering is not None:
             chunk["rendering"] = rendering
+        if grok is not None:
+            chunk["grok"] = grok
         return f"data: {orjson.dumps(chunk).decode()}\n\n"
 
     def _ensure_source_group(
@@ -1231,6 +1430,91 @@ class StreamProcessor(proc_base.BaseProcessor):
             self.think_opened = False
             self.think_closed_once = True
 
+    def _remember_answer_text(self, content: str) -> None:
+        if content:
+            self._emitted_answer_text += content
+
+    def _find_follow_up_fallback(self, responses: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+        parent_id = _clean_id(self._request_parent_response_id)
+        if not parent_id:
+            return None
+
+        selected_user: Dict[str, Any] | None = None
+        for item in responses:
+            if not isinstance(item, dict):
+                continue
+            sender = str(item.get("sender") or "").lower()
+            if sender not in {"human", "user"}:
+                continue
+            if _clean_id(item.get("parentResponseId")) == parent_id:
+                selected_user = item
+
+        user_id = _clean_id((selected_user or {}).get("responseId"))
+        if not user_id:
+            return None
+
+        selected_assistant: Dict[str, Any] | None = None
+        for item in responses:
+            if not isinstance(item, dict):
+                continue
+            sender = str(item.get("sender") or "").lower()
+            if sender != "assistant":
+                continue
+            if _clean_id(item.get("parentResponseId")) == user_id:
+                selected_assistant = item
+        return selected_assistant
+
+    async def _emit_follow_up_fallback(self) -> AsyncGenerator[str, None]:
+        if self._emitted_answer_text.strip():
+            return
+        if not self._conversation_id or not self._request_parent_response_id:
+            return
+
+        assistant: Dict[str, Any] | None = None
+        browser = get_config("proxy.browser")
+        async with AsyncSession(impersonate=browser) as session:
+            for attempt in range(6):
+                payload = await AppChatReverse.fetch_responses(
+                    session,
+                    self.token,
+                    self._conversation_id,
+                )
+                responses = payload.get("responses")
+                if isinstance(responses, list):
+                    assistant = self._find_follow_up_fallback(responses)
+                    if assistant:
+                        break
+                if attempt < 5:
+                    await asyncio.sleep(1)
+
+        if not assistant:
+            return
+
+        response_id = _clean_id(assistant.get("responseId"))
+        if response_id:
+            self.response_id = response_id
+            self._parent_response_id = response_id
+            yield self._sse(grok=self._grok_metadata())
+
+        if not self.role_sent:
+            yield self._sse(role="assistant", grok=self._grok_metadata())
+            self.role_sent = True
+
+        render_payload = extract_render_payload(assistant)
+        if render_payload:
+            render_payload = await _cache_render_files(
+                render_payload, self.token, self._get_dl()
+            )
+            yield self._sse(rendering=render_payload)
+
+        content = str(assistant.get("message") or "")
+        if content.strip():
+            if self.think_opened:
+                async for chunk in self._close_think_block():
+                    yield chunk
+            self._remember_answer_text(content)
+            yield self._sse(content)
+
     async def process(self, response: AsyncIterable[bytes]) -> AsyncGenerator[str, None]:
         """Process stream response.
         
@@ -1255,6 +1539,15 @@ class StreamProcessor(proc_base.BaseProcessor):
                 except orjson.JSONDecodeError:
                     continue
 
+                result = data.get("result") if isinstance(data, dict) else None
+                conversation = result.get("conversation") if isinstance(result, dict) else None
+                if isinstance(conversation, dict):
+                    conversation_id = _clean_id(conversation.get("conversationId"))
+                    if conversation_id:
+                        self._conversation_id = conversation_id
+                        yield self._sse(grok=self._grok_metadata())
+                    continue
+
                 resp = _extract_stream_response(data)
                 if resp is None:
                     continue
@@ -1272,7 +1565,7 @@ class StreamProcessor(proc_base.BaseProcessor):
                     self.rollout_id = str(rid)
 
                 if not self.role_sent:
-                    yield self._sse(role="assistant")
+                    yield self._sse(role="assistant", grok=self._grok_metadata())
                     self.role_sent = True
 
                 if img := resp.get("streamingImageGenerationResponse"):
@@ -1290,6 +1583,9 @@ class StreamProcessor(proc_base.BaseProcessor):
                     continue
 
                 if mr := resp.get("modelResponse"):
+                    if response_id := _clean_id(mr.get("responseId")):
+                        self._parent_response_id = response_id
+                        yield self._sse(grok=self._grok_metadata())
                     render_payload = extract_render_payload(mr)
                     if render_payload:
                         render_payload = await _cache_render_files(
@@ -1418,19 +1714,24 @@ class StreamProcessor(proc_base.BaseProcessor):
                     if self._tool_stream_enabled:
                         for kind, payload in self._handle_tool_stream(filtered):
                             if kind == "text":
+                                self._remember_answer_text(payload)
                                 yield self._sse(payload)
                             elif kind == "tool":
                                 yield self._sse(tool_calls=[payload])
                         continue
 
+                    self._remember_answer_text(filtered)
                     yield self._sse(filtered)
 
+            async for chunk in self._emit_follow_up_fallback():
+                yield chunk
             if self.think_opened:
                 async for chunk in self._close_think_block():
                     yield chunk
             if self._tool_stream_enabled:
                 for kind, payload in self._flush_tool_stream():
                     if kind == "text":
+                        self._remember_answer_text(payload)
                         yield self._sse(payload)
                     elif kind == "tool":
                         yield self._sse(tool_calls=[payload])
@@ -1507,11 +1808,13 @@ class CollectProcessor(proc_base.BaseProcessor):
         token: str = "",
         tools: List[Dict[str, Any]] = None,
         tool_choice: Any = None,
+        request_metadata: Dict[str, Any] | None = None,
     ):
         super().__init__(model, token)
         self.filter_tags = get_config("app.filter_tags")
         self.tools = tools
         self.tool_choice = tool_choice
+        self._request_metadata = request_metadata if isinstance(request_metadata, dict) else {}
 
     def _filter_content(self, content: str) -> str:
         """Filter special tags in content."""
@@ -1567,6 +1870,14 @@ class CollectProcessor(proc_base.BaseProcessor):
                 except orjson.JSONDecodeError:
                     continue
 
+                result = data.get("result") if isinstance(data, dict) else None
+                conversation = result.get("conversation") if isinstance(result, dict) else None
+                if isinstance(conversation, dict):
+                    conversation_id = _clean_id(conversation.get("conversationId"))
+                    if conversation_id:
+                        self._request_metadata["conversationId"] = conversation_id
+                    continue
+
                 resp = _extract_stream_response(data)
                 if resp is None:
                     continue
@@ -1579,6 +1890,8 @@ class CollectProcessor(proc_base.BaseProcessor):
                 if mr := resp.get("modelResponse"):
                     final_model_response = mr
                     response_id = mr.get("responseId", "")
+                    if response_id:
+                        self._request_metadata["parentResponseId"] = response_id
                     content = mr.get("message", "")
 
                     card_map: dict[str, tuple[str, str]] = {}
@@ -1695,7 +2008,7 @@ class CollectProcessor(proc_base.BaseProcessor):
         if render_payload:
             message_obj["rendering"] = render_payload
 
-        return {
+        result_payload = {
             "id": response_id,
             "object": "chat.completion",
             "created": self.created,
@@ -1725,6 +2038,9 @@ class CollectProcessor(proc_base.BaseProcessor):
                 },
             },
         }
+        if self._request_metadata:
+            result_payload["grok"] = self._request_metadata
+        return result_payload
 
 
 __all__ = [

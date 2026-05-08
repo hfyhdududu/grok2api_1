@@ -18,6 +18,8 @@ from app.services.reverse.utils.headers import build_headers
 from app.services.reverse.utils.retry import retry_on_status
 
 CHAT_API = "https://grok.com/rest/app-chat/conversations/new"
+CHAT_RESPONSE_API = "https://grok.com/rest/app-chat/conversations/{conversation_id}/responses"
+CHAT_RESPONSES_LIST_API = "https://grok.com/rest/app-chat/conversations/{conversation_id}/responses"
 
 
 def _is_transient_network_error(err: Exception) -> bool:
@@ -120,10 +122,13 @@ class AppChatReverse:
         image_generation_count: int | None = None,
         omit_file_attachments: bool = False,
         minimal_payload: bool = False,
+        parent_response_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> Dict[str, Any]:
         """Build chat payload for Grok app-chat API."""
 
         attachments = file_attachments or []
+        is_follow_up = bool(conversation_id)
 
         if minimal_payload:
             payload = {
@@ -186,14 +191,30 @@ class AppChatReverse:
             "toolOverrides": tool_overrides or {},
         }
 
+        if is_follow_up:
+            payload.pop("modelName", None)
+            payload.pop("temporary", None)
+            payload.pop("responseMetadata", None)
+            payload.pop("isReasoning", None)
+            payload.pop("toolOverrides", None)
+            payload["parentResponseId"] = parent_response_id or ""
+            payload["metadata"] = {"request_metadata": {}}
+            payload["isFromGrokFiles"] = False
+            payload["skipCancelCurrentInflightRequests"] = False
+            payload["isRegenRequest"] = False
+            payload["collectionIds"] = []
+            payload["disabledConnectorIds"] = []
+
         if model_config_override:
-            payload["responseMetadata"]["modelConfigOverride"] = model_config_override
+            if not is_follow_up:
+                payload["responseMetadata"]["modelConfigOverride"] = model_config_override
 
         if omit_file_attachments:
             payload.pop("fileAttachments", None)
 
         if model == "grok-420":
-            payload["enable420"] = True
+            if not is_follow_up:
+                payload["enable420"] = True
             if mode:
                 payload["modeId"] = mode
         elif mode:
@@ -219,6 +240,8 @@ class AppChatReverse:
         image_generation_count: int | None = None,
         omit_file_attachments: bool = False,
         minimal_payload: bool = False,
+        conversation_id: str | None = None,
+        parent_response_id: str | None = None,
     ) -> Any:
         """Send app chat request to Grok.
         
@@ -259,6 +282,13 @@ class AppChatReverse:
                 image_generation_count=image_generation_count,
                 omit_file_attachments=omit_file_attachments,
                 minimal_payload=minimal_payload,
+                conversation_id=conversation_id,
+                parent_response_id=parent_response_id,
+            )
+            url = (
+                CHAT_RESPONSE_API.format(conversation_id=conversation_id)
+                if conversation_id
+                else CHAT_API
             )
             logger.info(
                 "AppChat request prepared: "
@@ -267,6 +297,8 @@ class AppChatReverse:
                 f"mode={mode or '-'}, "
                 f"message_len={len(message or '')}, "
                 f"file_attachments={len(file_attachments or [])}, "
+                f"conversation_id={conversation_id or '-'}, "
+                f"parent_response_id={parent_response_id or '-'}, "
                 f"tools={','.join((tool_overrides or {}).keys()) or '-'}"
             )
 
@@ -287,7 +319,7 @@ class AppChatReverse:
             async def _do_request():
                 try:
                     response = await session.post(
-                        CHAT_API,
+                        url,
                         headers=headers,
                         data=orjson.dumps(payload),
                         timeout=timeout,
@@ -409,6 +441,62 @@ class AppChatReverse:
             )
             raise UpstreamException(
                 message=f"AppChatReverse: Chat failed, {str(e)}",
+                details={"status": 502, "error": str(e)},
+            )
+
+    @staticmethod
+    async def fetch_responses(
+        session: AsyncSession,
+        token: str,
+        conversation_id: str,
+    ) -> Dict[str, Any]:
+        """Fetch stored responses for an existing Grok conversation."""
+        try:
+            base_proxy = get_config("proxy.base_proxy_url")
+            proxies = {"http": base_proxy, "https": base_proxy} if base_proxy else None
+            headers = build_headers(
+                cookie_token=token,
+                content_type="application/json",
+                origin="https://grok.com",
+                referer=f"https://grok.com/c/{conversation_id}",
+            )
+            url = CHAT_RESPONSES_LIST_API.format(conversation_id=conversation_id)
+            timeout = float(get_config("chat.timeout") or 60.0)
+            browser = get_config("proxy.browser")
+            response = await session.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                proxies=proxies,
+                impersonate=browser,
+            )
+            text_value = getattr(response, "text", "")
+            if callable(text_value):
+                maybe_text = text_value()
+                text = await maybe_text if inspect.isawaitable(maybe_text) else maybe_text
+            else:
+                text = text_value
+            text = str(text or "")
+            if response.status_code != 200:
+                logger.warning(
+                    "AppChat responses fetch failed: "
+                    f"status={response.status_code}, conversation_id={conversation_id}"
+                )
+                raise UpstreamException(
+                    message=f"AppChatReverse: Responses fetch failed, {response.status_code}",
+                    details={"status": response.status_code, "body": text},
+                )
+            payload = orjson.loads(text)
+            return payload if isinstance(payload, dict) else {}
+        except UpstreamException:
+            raise
+        except Exception as e:
+            logger.warning(
+                "AppChat responses fetch failed: "
+                f"conversation_id={conversation_id}, error={e}"
+            )
+            raise UpstreamException(
+                message=f"AppChatReverse: Responses fetch failed, {str(e)}",
                 details={"status": 502, "error": str(e)},
             )
 

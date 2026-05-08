@@ -45,6 +45,8 @@ const LOCALE_MAP = {
     "app_url": { title: "应用地址", desc: "当前 Grok2API 服务的外部访问 URL，用于文件链接访问。" },
     "image_format": { title: "图片格式", desc: "默认生成的图片格式（url 或 base64）。" },
     "video_format": { title: "视频格式", desc: "默认生成的视频格式（html 或 url，url 为处理后的链接）。" },
+    "continue_conversation": { title: "沿用官网对话", desc: "开启后，Chat 页面会保存 Grok 官网会话编号，并在同一会话里继续提问。已上传过的附件会复用官网文件编号，减少重复上传。" },
+    "reuse_grok_conversation": { title: "沿用官网对话", desc: "开启后，Chat 页面会保存 Grok 官网会话编号，并在同一会话里继续提问。已上传过的附件会复用官网文件编号，减少重复上传。" },
     "temporary": { title: "临时对话", desc: "是否默认启用临时对话模式。" },
     "disable_memory": { title: "禁用记忆", desc: "是否默认禁用 Grok 记忆功能。" },
     "stream": { title: "流式响应", desc: "是否默认启用流式输出。" },
@@ -189,6 +191,7 @@ const CF_REFRESH_SUB_KEYS = ['flaresolverr_url', 'refresh_interval', 'timeout'];
 
 const SECTION_ORDER = new Map(Object.keys(LOCALE_MAP).map((key, index) => [key, index]));
 const HIDDEN_CONFIG_KEYS = new Map([
+  ['app', new Set(['reuse_grok_conversation'])],
   ['chat', new Set(['capture_enabled', 'capture_file'])],
 ]);
 
@@ -864,6 +867,9 @@ async function saveConfig() {
     const newConfig = typeof structuredClone === 'function'
       ? structuredClone(currentConfig)
       : JSON.parse(JSON.stringify(currentConfig));
+    if (newConfig.app && Object.prototype.hasOwnProperty.call(newConfig.app, 'reuse_grok_conversation')) {
+      delete newConfig.app.reuse_grok_conversation;
+    }
     const inputs = document.querySelectorAll('input[data-section], textarea[data-section], select[data-section], [data-type="model-routing"][data-section]');
 
     inputs.forEach(input => {

@@ -19,6 +19,8 @@ function normalizeSessionMeta(session) {
     id: String(session.id || ''),
     title: String(session.title || '新会话'),
     model: String(session.model || ''),
+    grokConversationId: String(session.grokConversationId || ''),
+    grokParentResponseId: String(session.grokParentResponseId || ''),
     createdAt: Number(session.createdAt || 0) || Date.now(),
     updatedAt: Number(session.updatedAt || 0) || Date.now(),
     isDefaultTitle: session.isDefaultTitle !== false,
@@ -55,6 +57,9 @@ function normalizeAttachmentRecord(sessionId, attachment) {
     mime: String(attachment.mime || blob.type || 'application/octet-stream'),
     size: Number(attachment.size || blob.size || 0) || 0,
     blob,
+    grokFileId: String(attachment.grokFileId || ''),
+    grokFileUri: String(attachment.grokFileUri || ''),
+    grokUploadedAt: Number(attachment.grokUploadedAt || 0) || 0,
     createdAt,
     updatedAt: Number(attachment.updatedAt || createdAt) || createdAt
   };
@@ -63,7 +68,7 @@ function normalizeAttachmentRecord(sessionId, attachment) {
 export function createChatSessionStore(options = {}) {
   const {
     dbName = 'grok2api-chat-db',
-    dbVersion = 2
+    dbVersion = 3
   } = options;
 
   let dbPromise = null;
@@ -206,6 +211,9 @@ export function createChatSessionStore(options = {}) {
       name: normalized.name,
       mime: normalized.mime,
       size: normalized.size,
+      grokFileId: normalized.grokFileId,
+      grokFileUri: normalized.grokFileUri,
+      grokUploadedAt: normalized.grokUploadedAt,
       createdAt: normalized.createdAt,
       updatedAt: normalized.updatedAt
     };
@@ -217,6 +225,25 @@ export function createChatSessionStore(options = {}) {
     return withTransaction(['attachments'], 'readonly', async (transaction) => {
       const row = await promisifyRequest(transaction.objectStore('attachments').get(attachmentId));
       return row && row.blob instanceof Blob ? row : null;
+    });
+  }
+
+  async function updateAttachmentMeta(id, patch) {
+    const attachmentId = String(id || '').trim();
+    if (!attachmentId || !patch || typeof patch !== 'object') return null;
+    return withTransaction(['attachments'], 'readwrite', async (transaction) => {
+      const store = transaction.objectStore('attachments');
+      const row = await promisifyRequest(store.get(attachmentId));
+      if (!row) return null;
+      const updated = {
+        ...row,
+        grokFileId: String(patch.grokFileId || patch.fileId || row.grokFileId || ''),
+        grokFileUri: String(patch.grokFileUri || patch.fileUri || row.grokFileUri || ''),
+        grokUploadedAt: Number(patch.grokUploadedAt || patch.uploadedAt || Date.now()) || Date.now(),
+        updatedAt: Date.now()
+      };
+      store.put(updated);
+      return updated;
     });
   }
 
@@ -360,6 +387,7 @@ export function createChatSessionStore(options = {}) {
       saveMessages,
       saveAttachment,
       getAttachment,
+      updateAttachmentMeta,
       deleteSessionAttachments,
       deleteSessionMessages,
       deleteSession,

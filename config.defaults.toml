@@ -14,6 +14,8 @@ public_key = ""
 image_format = "url"
 # 生成视频的格式（html 或 url）
 video_format = "html"
+# 是否沿用 Grok 官网会话和已上传附件
+continue_conversation = false
 # 是否启用临时对话模式
 temporary = true
 # 是否禁用 Grok 记忆功能

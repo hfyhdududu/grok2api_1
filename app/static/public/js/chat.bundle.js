@@ -3148,6 +3148,8 @@
       id: String(session.id || ""),
       title: String(session.title || "\u65B0\u4F1A\u8BDD"),
       model: String(session.model || ""),
+      grokConversationId: String(session.grokConversationId || ""),
+      grokParentResponseId: String(session.grokParentResponseId || ""),
       createdAt: Number(session.createdAt || 0) || Date.now(),
       updatedAt: Number(session.updatedAt || 0) || Date.now(),
       isDefaultTitle: session.isDefaultTitle !== false,
@@ -3182,6 +3184,9 @@
       mime: String(attachment.mime || blob.type || "application/octet-stream"),
       size: Number(attachment.size || blob.size || 0) || 0,
       blob,
+      grokFileId: String(attachment.grokFileId || ""),
+      grokFileUri: String(attachment.grokFileUri || ""),
+      grokUploadedAt: Number(attachment.grokUploadedAt || 0) || 0,
       createdAt,
       updatedAt: Number(attachment.updatedAt || createdAt) || createdAt
     };
@@ -3189,7 +3194,7 @@
   function createChatSessionStore(options = {}) {
     const {
       dbName = "grok2api-chat-db",
-      dbVersion = 2
+      dbVersion = 3
     } = options;
     let dbPromise = null;
     async function openDatabase() {
@@ -3311,6 +3316,9 @@
         name: normalized.name,
         mime: normalized.mime,
         size: normalized.size,
+        grokFileId: normalized.grokFileId,
+        grokFileUri: normalized.grokFileUri,
+        grokUploadedAt: normalized.grokUploadedAt,
         createdAt: normalized.createdAt,
         updatedAt: normalized.updatedAt
       };
@@ -3321,6 +3329,24 @@
       return withTransaction(["attachments"], "readonly", async (transaction) => {
         const row = await promisifyRequest(transaction.objectStore("attachments").get(attachmentId));
         return row && row.blob instanceof Blob ? row : null;
+      });
+    }
+    async function updateAttachmentMeta(id, patch) {
+      const attachmentId = String(id || "").trim();
+      if (!attachmentId || !patch || typeof patch !== "object") return null;
+      return withTransaction(["attachments"], "readwrite", async (transaction) => {
+        const store = transaction.objectStore("attachments");
+        const row = await promisifyRequest(store.get(attachmentId));
+        if (!row) return null;
+        const updated = {
+          ...row,
+          grokFileId: String(patch.grokFileId || patch.fileId || row.grokFileId || ""),
+          grokFileUri: String(patch.grokFileUri || patch.fileUri || row.grokFileUri || ""),
+          grokUploadedAt: Number(patch.grokUploadedAt || patch.uploadedAt || Date.now()) || Date.now(),
+          updatedAt: Date.now()
+        };
+        store.put(updated);
+        return updated;
       });
     }
     async function deleteSessionAttachments(sessionId) {
@@ -3456,6 +3482,7 @@
       saveMessages,
       saveAttachment,
       getAttachment,
+      updateAttachmentMeta,
       deleteSessionAttachments,
       deleteSessionMessages,
       deleteSession,
@@ -3516,7 +3543,7 @@
     const SIDEBAR_STATE_KEY = "grok2api_chat_sidebar_collapsed";
     const ACTIVE_SESSION_STORAGE_KEY = "grok2api_chat_active_session_id";
     const LEGACY_MIGRATED_KEY = "grok2api_chat_sessions_migrated";
-    const STORAGE_SCHEMA_VERSION = 2;
+    const STORAGE_SCHEMA_VERSION = 3;
     const AUTO_SCROLL_THRESHOLD = 48;
     const STREAM_RENDER_INTERVAL_MS = 96;
     const STREAM_PERSIST_INTERVAL_MS = 320;
@@ -3637,6 +3664,7 @@
         size: Number(record.size || record.blob.size || 0) || 0,
         data: rememberAttachmentObjectUrl(record.id, record.blob),
         attachmentId: record.id,
+        grokFileId: record.grokFileId || "",
         stored: true
       };
     }
@@ -3661,8 +3689,12 @@
           const persistedUrl = attachmentId ? buildIndexedDbAttachmentUrl(attachmentId) : imageUrl;
           return persistedUrl ? {
             type: "image_url",
-            image_url: { url: persistedUrl },
+            image_url: {
+              url: persistedUrl,
+              grok_file_id: block.grokFileId || block.file_id || ""
+            },
             attachmentId: attachmentId || void 0,
+            grokFileId: block.grokFileId || block.file_id || "",
             name: trimPersistText(block.name || "", 256),
             mime: trimPersistText(block.mime || "", 128),
             size: Number(block.size || 0) || 0,
@@ -3677,6 +3709,7 @@
             mime: trimPersistText(block.mime || "", 128),
             size: Number(block.size || 0) || 0,
             attachmentId: attachmentId || void 0,
+            grokFileId: block.grokFileId || block.file_id || block.file && block.file.grok_file_id || "",
             url: attachmentId ? buildIndexedDbAttachmentUrl(attachmentId) : sanitizePersistUrl(block.url || "")
           };
         }
@@ -3816,6 +3849,8 @@
         id: session.id,
         title: session.title || "\u65B0\u4F1A\u8BDD",
         model: session.model || "",
+        grokConversationId: session.grokConversationId || "",
+        grokParentResponseId: session.grokParentResponseId || "",
         createdAt: Number(session.createdAt || 0) || Date.now(),
         updatedAt: Number(session.updatedAt || 0) || Date.now(),
         isDefaultTitle: session.isDefaultTitle !== false,
@@ -4115,7 +4150,8 @@
     function syncSessionModel() {
       const session = getActiveSession();
       if (!session) return;
-      session.model = modelSelect && modelSelect.value || "";
+      const nextModel = modelSelect && modelSelect.value || "";
+      session.model = nextModel;
     }
     function restoreSessionModel() {
       const session = getActiveSession();
@@ -4166,6 +4202,9 @@
         id,
         title: "\u65B0\u4F1A\u8BDD",
         isDefaultTitle: true,
+        model: modelSelect && modelSelect.value || "",
+        grokConversationId: "",
+        grokParentResponseId: "",
         createdAt: Date.now(),
         updatedAt: Date.now(),
         messages: [],
@@ -6030,6 +6069,89 @@ ${renderedAnswer}`.trim();
       }
       scheduleAssistantRender(entry);
     }
+    function attachGrokFileIdToContent(content, attachmentId, fileId) {
+      if (!Array.isArray(content) || !attachmentId || !fileId) return content;
+      return content.map((block) => {
+        if (!block || typeof block !== "object") return block;
+        const blockAttachmentId = getImageBlockAttachmentId(block) || getFileBlockAttachmentId(block);
+        if (blockAttachmentId !== attachmentId) return block;
+        const next = { ...block, grokFileId: fileId };
+        if (next.type === "image_url") {
+          const image = next.image_url && typeof next.image_url === "object" ? { ...next.image_url } : {};
+          image.grok_file_id = fileId;
+          image.file_id = fileId;
+          next.image_url = image;
+        }
+        if (next.type === "file") {
+          const file = next.file && typeof next.file === "object" ? { ...next.file } : {};
+          file.grok_file_id = fileId;
+          file.file_id = fileId;
+          next.file = file;
+        }
+        return next;
+      });
+    }
+    function applyUploadedAttachmentMeta(session, uploadedItems) {
+      if (!session || !Array.isArray(uploadedItems) || !uploadedItems.length) return;
+      const byAttachment = /* @__PURE__ */ new Map();
+      uploadedItems.forEach((item) => {
+        if (!item || typeof item !== "object") return;
+        const attachmentId = String(item.attachmentId || "").trim();
+        const fileId = String(item.fileId || item.file_id || "").trim();
+        if (attachmentId && fileId) byAttachment.set(attachmentId, item);
+      });
+      if (!byAttachment.size || !Array.isArray(session.messages)) return;
+      session.messages = session.messages.map((message) => {
+        if (!message || message.role !== "user" || !Array.isArray(message.content)) return message;
+        let content = message.content;
+        byAttachment.forEach((item, attachmentId) => {
+          content = attachGrokFileIdToContent(content, attachmentId, item.fileId || item.file_id);
+        });
+        return { ...message, content, updatedAt: Date.now() };
+      });
+      if (sessionsData && sessionsData.activeId === session.id) {
+        messageHistory = cloneMessages(session.messages);
+      }
+      byAttachment.forEach((item, attachmentId) => {
+        if (!storageFallbackMode && chatSessionStore.updateAttachmentMeta) {
+          void enqueueStorageWork(async () => {
+            await chatSessionStore.updateAttachmentMeta(attachmentId, {
+              grokFileId: item.fileId || item.file_id || "",
+              grokFileUri: item.fileUri || item.file_uri || "",
+              uploadedAt: Date.now()
+            });
+          });
+        }
+      });
+    }
+    function applyGrokMetadata(grokMeta, targetSessionId = null) {
+      if (!grokMeta || typeof grokMeta !== "object" || !sessionsData) return;
+      const sessionId = targetSessionId || sessionsData.activeId;
+      const session = sessionsData.sessions.find((s) => s.id === sessionId);
+      if (!session) return;
+      const conversationId = String(grokMeta.conversationId || grokMeta.conversation_id || "").trim();
+      const parentResponseId = String(grokMeta.parentResponseId || grokMeta.parent_response_id || "").trim();
+      let changed = false;
+      if (conversationId && session.grokConversationId !== conversationId) {
+        session.grokConversationId = conversationId;
+        changed = true;
+      }
+      if (parentResponseId && session.grokParentResponseId !== parentResponseId) {
+        session.grokParentResponseId = parentResponseId;
+        changed = true;
+      }
+      const uploadedItems = Array.isArray(grokMeta.uploadedAttachments) ? grokMeta.uploadedAttachments : [];
+      if (uploadedItems.length) {
+        applyUploadedAttachmentMeta(session, uploadedItems);
+        changed = true;
+      }
+      if (changed) {
+        session.updatedAt = Date.now();
+        persistSessionMeta(session);
+        persistSessionMessages(session);
+        saveSessions();
+      }
+    }
     function upsertAssistantMessage(sessionId, messageId, assistantText, assistantSources = null, assistantRendering = null, committed = false, draftState = null) {
       if (!sessionId || !sessionsData || !messageId) return;
       const session = sessionsData.sessions.find((s) => s.id === sessionId);
@@ -6658,14 +6780,40 @@ ${renderedAnswer}`.trim();
           if (attachmentId) {
             const dataUrl = await resolveStoredAttachmentDataUrl(attachmentId);
             if (dataUrl) {
-              mapped.push({ type: "image_url", image_url: { url: dataUrl } });
+              mapped.push({
+                type: "image_url",
+                image_url: {
+                  url: dataUrl,
+                  grok_file_id: block.grokFileId || "",
+                  file_id: block.grokFileId || ""
+                },
+                attachmentId,
+                name: block.name || block.filename || "image",
+                mime: block.mime || "image/jpeg",
+                size: Number(block.size || 0) || 0,
+                grokFileId: block.grokFileId || ""
+              });
             } else {
               throw new Error("\u56FE\u7247\u9644\u4EF6\u672A\u627E\u5230\uFF0C\u65E0\u6CD5\u7EE7\u7EED\u53D1\u9001\u8BE5\u4E0A\u4E0B\u6587");
             }
             continue;
           }
           const imageUrl = block.image_url && typeof block.image_url === "object" ? String(block.image_url.url || "").trim() : String(block.url || "").trim();
-          if (imageUrl) mapped.push({ type: "image_url", image_url: { url: imageUrl } });
+          if (imageUrl) {
+            mapped.push({
+              type: "image_url",
+              image_url: {
+                url: imageUrl,
+                grok_file_id: block.grokFileId || "",
+                file_id: block.grokFileId || ""
+              },
+              attachmentId: block.attachmentId || void 0,
+              name: block.name || block.filename || "image",
+              mime: block.mime || "image/jpeg",
+              size: Number(block.size || 0) || 0,
+              grokFileId: block.grokFileId || ""
+            });
+          }
           continue;
         }
         if (block.type === "file") {
@@ -6681,7 +6829,9 @@ ${renderedAnswer}`.trim();
                 file_data: dataUrl,
                 filename: block.name || block.filename || "file",
                 mime_type: block.mime || "",
-                size: Number(block.size || 0) || 0
+                size: Number(block.size || 0) || 0,
+                grok_file_id: block.grokFileId || "",
+                file_id: block.grokFileId || ""
               },
               attachmentId
             });
@@ -6695,7 +6845,9 @@ ${renderedAnswer}`.trim();
                 file_data: fileData,
                 filename: block.name || block.filename || "",
                 mime_type: block.mime || "",
-                size: Number(block.size || 0) || 0
+                size: Number(block.size || 0) || 0,
+                grok_file_id: block.grokFileId || "",
+                file_id: block.grokFileId || ""
               }
             });
           }
@@ -6715,12 +6867,20 @@ ${renderedAnswer}`.trim();
       return payload;
     }
     async function buildPayload() {
+      const session = getActiveSession();
       const payload = {
         model: modelSelect && modelSelect.value || "grok-3",
         messages: await buildMessages(),
         stream: true,
         temperature: Number(tempRange ? tempRange.value : 0.8),
-        top_p: Number(topPRange ? topPRange.value : 0.95)
+        top_p: Number(topPRange ? topPRange.value : 0.95),
+        provider_options: {
+          grok: {
+            conversation_id: session ? session.grokConversationId || "" : "",
+            parent_response_id: session ? session.grokParentResponseId || "" : "",
+            reuse_conversation: true
+          }
+        }
       };
       const reasoning = reasoningSelect ? reasoningSelect.value : "";
       if (reasoning) {
@@ -6729,12 +6889,20 @@ ${renderedAnswer}`.trim();
       return payload;
     }
     async function buildPayloadFrom(history) {
+      const session = getActiveSession();
       const payload = {
         model: modelSelect && modelSelect.value || "grok-3",
         messages: await buildMessagesFrom(history),
         stream: true,
         temperature: Number(tempRange ? tempRange.value : 0.8),
-        top_p: Number(topPRange ? topPRange.value : 0.95)
+        top_p: Number(topPRange ? topPRange.value : 0.95),
+        provider_options: {
+          grok: {
+            conversation_id: session ? session.grokConversationId || "" : "",
+            parent_response_id: session ? session.grokParentResponseId || "" : "",
+            reuse_conversation: true
+          }
+        }
       };
       const reasoning = reasoningSelect ? reasoningSelect.value : "";
       if (reasoning) {
@@ -7209,7 +7377,8 @@ ${renderedAnswer}`.trim();
               attachmentId: attachmentId || void 0,
               name: item.name || "image",
               mime: item.mime || "image/jpeg",
-              size: Number(item.size || 0) || 0
+              size: Number(item.size || 0) || 0,
+              grokFileId: item.grokFileId || ""
             });
           } else {
             const attachmentId = String(item.attachmentId || "").trim();
@@ -7230,12 +7399,15 @@ ${renderedAnswer}`.trim();
                 file_data: attachmentId ? buildIndexedDbAttachmentUrl(attachmentId) : item.data,
                 filename: item.name || "file",
                 mime_type: item.mime || "",
-                size: Number(item.size || 0) || 0
+                size: Number(item.size || 0) || 0,
+                grok_file_id: item.grokFileId || "",
+                file_id: item.grokFileId || ""
               },
               attachmentId: attachmentId || void 0,
               name: item.name || "file",
               mime: item.mime || "",
-              size: Number(item.size || 0) || 0
+              size: Number(item.size || 0) || 0,
+              grokFileId: item.grokFileId || ""
             });
           }
         }
@@ -7364,6 +7536,9 @@ ${renderedAnswer}`.trim();
               }
               try {
                 const json = JSON.parse(payload);
+                if (json && json.grok && typeof json.grok === "object") {
+                  applyGrokMetadata(json.grok, targetSessionId);
+                }
                 if (json && json.sources && typeof json.sources === "object") {
                   assistantEntry.sources = json.sources;
                   if (assistantEntry.row && assistantEntry.row.querySelector(".message-actions")) {

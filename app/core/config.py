@@ -156,6 +156,7 @@ def _migrate_deprecated_config(
         "thinking": "thinking",
         "dynamic_statsig": "dynamic_statsig",
         "filter_tags": "filter_tags",
+        "reuse_grok_conversation": "continue_conversation",
         "capture_enabled": "chat_capture_enabled",
         "capture_file": "chat_capture_file",
     }
@@ -172,6 +173,14 @@ def _migrate_deprecated_config(
                 logger.debug(
                     f"Migrated config: chat.{old_key} -> app.{new_key} = {chat_section[old_key]}"
                 )
+
+    app_section = result.setdefault("app", {})
+    if "reuse_grok_conversation" in app_section:
+        if "continue_conversation" not in app_section:
+            app_section["continue_conversation"] = app_section["reuse_grok_conversation"]
+        app_section.pop("reuse_grok_conversation", None)
+        migrated_count += 1
+        logger.debug("Migrated config: app.reuse_grok_conversation -> app.continue_conversation")
 
     if migrated_count > 0:
         logger.info(
@@ -300,6 +309,7 @@ class Config:
             previous = deepcopy(self._config or {})
             base = _deep_merge(self._defaults, self._config or {})
             merged = _deep_merge(base, new_config or {})
+            merged, _ = _migrate_deprecated_config(merged, set(self._defaults.keys()))
             await storage.save_config(merged)
             self._config = merged
         self._apply_runtime_updates(previous, self._config)

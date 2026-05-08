@@ -508,6 +508,14 @@ def validate_request(request: ChatCompletionRequest):
                             param=f"messages.{idx}.content.{block_idx}.file",
                             code="missing_file",
                         )
+                    reusable_file_id = (
+                        file_data.get("grok_file_id")
+                        or file_data.get("file_id")
+                        or block.get("grok_file_id")
+                        or block.get("file_id")
+                    )
+                    if reusable_file_id:
+                        continue
                     _validate_media_input(
                         file_data.get("file_data", ""),
                         "file.file_data",
@@ -1047,6 +1055,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             parallel_tool_calls=(
                 True if request.parallel_tool_calls is None else request.parallel_tool_calls
             ),
+            provider_options=request.provider_options or request.providerOptions,
         )
 
     if isinstance(result, dict):
