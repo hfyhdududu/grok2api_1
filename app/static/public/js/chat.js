@@ -131,6 +131,15 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     return parseIndexedDbAttachmentUrl(imageUrl);
   }
 
+  function getFileBlockAttachmentId(block) {
+    if (!block || typeof block !== 'object') return '';
+    if (block.attachmentId) return String(block.attachmentId || '').trim();
+    const fileData = block.file && typeof block.file === 'object'
+      ? String(block.file.file_data || '').trim()
+      : String(block.url || block.data || '').trim();
+    return parseIndexedDbAttachmentUrl(fileData);
+  }
+
   function rememberAttachmentObjectUrl(attachmentId, blob) {
     const id = String(attachmentId || '').trim();
     if (!id || !(blob instanceof Blob)) return '';
@@ -154,12 +163,12 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
   function blobToDataUrl(blob) {
     return new Promise((resolve, reject) => {
       if (!(blob instanceof Blob)) {
-        reject(new Error('图片内容不可用'));
+        reject(new Error('文件内容不可用'));
         return;
       }
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result || ''));
-      reader.onerror = () => reject(reader.error || new Error('读取图片失败'));
+      reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
       reader.readAsDataURL(blob);
     });
   }
@@ -221,12 +230,14 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
         } : { type: 'image_url', persistedPreview: false };
       }
       if (block.type === 'file') {
+        const attachmentId = getFileBlockAttachmentId(block);
         return {
           type: 'file',
           name: trimPersistText(block.name || block.filename || '', 256),
           mime: trimPersistText(block.mime || '', 128),
           size: Number(block.size || 0) || 0,
-          url: sanitizePersistUrl(block.url || '')
+          attachmentId: attachmentId || undefined,
+          url: attachmentId ? buildIndexedDbAttachmentUrl(attachmentId) : sanitizePersistUrl(block.url || '')
         };
       }
       return null;
@@ -256,6 +267,21 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
         .map((item) => sanitizePersistUrl(item))
         .filter(Boolean)
         .slice(0, 24);
+    }
+    if (Array.isArray(rendering.files)) {
+      sanitized.files = rendering.files
+        .slice(0, 24)
+        .map((item) => ({
+          id: trimPersistText(item && item.id || '', 256),
+          name: trimPersistText(item && item.name || '', 256),
+          url: sanitizePersistUrl(item && item.url || ''),
+          mime: trimPersistText(item && item.mime || '', 128),
+          contentType: trimPersistText(item && item.contentType || '', 64),
+          size: Number(item && item.size || 0) || 0,
+          thumbnailUrl: sanitizePersistUrl(item && item.thumbnailUrl || ''),
+          thumbnailDarkUrl: sanitizePersistUrl(item && item.thumbnailDarkUrl || '')
+        }))
+        .filter((item) => item.url);
     }
     const rawModelResponse = rendering.rawModelResponse && typeof rendering.rawModelResponse === 'object'
       ? rendering.rawModelResponse
@@ -288,7 +314,12 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
           caption: trimPersistText(item && item.caption || '', 512),
           sourceHref: sanitizePersistUrl(item && item.sourceHref || ''),
           sourceLabel: trimPersistText(item && item.sourceLabel || '', 256),
-          fallbackSrc: sanitizePersistUrl(item && item.fallbackSrc || '')
+          fallbackSrc: sanitizePersistUrl(item && item.fallbackSrc || ''),
+          kind: trimPersistText(item && item.kind || '', 32),
+          name: trimPersistText(item && item.name || '', 256),
+          mime: trimPersistText(item && item.mime || '', 128),
+          contentType: trimPersistText(item && item.contentType || '', 64),
+          size: Number(item && item.size || 0) || 0
         })).filter((item) => item.src || item.cardId)
         : []
     };
@@ -569,9 +600,32 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
           placeholderLabel: '图片附件未缓存'
         });
       }
-      if (block.type === 'file' && (block.data || block.url)) {
-        results.push({ mime: block.mime || '', name: block.name || 'file', data: block.data || block.url });
-      } else if (block.type === 'file') {
+      if (block.type === 'file') {
+        const attachmentId = getFileBlockAttachmentId(block);
+        if (attachmentId) {
+          const preview = await resolveStoredAttachmentPreview(attachmentId);
+          if (preview) {
+            results.push({
+              ...preview,
+              name: block.name || preview.name || 'file',
+              mime: block.mime || preview.mime || '',
+              size: Number(block.size || preview.size || 0) || 0
+            });
+            continue;
+          }
+          results.push({
+            mime: block.mime || '',
+            name: block.name || 'file',
+            placeholder: true,
+            placeholderLabel: '文件附件未缓存',
+            size: Number(block.size || 0) || 0
+          });
+          continue;
+        }
+        if (block.data || block.url) {
+          results.push({ mime: block.mime || '', name: block.name || 'file', data: block.data || block.url });
+          continue;
+        }
         results.push({
           mime: block.mime || '',
           name: block.name || 'file',
@@ -1342,7 +1396,9 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     }
     if (original && !original.startsWith('http')) {
         let basePath = original.startsWith('/') ? original : '/' + original;
-        original = '/v1/files/image' + basePath;
+        original = basePath.startsWith('/users/')
+          ? '/v1/files/asset' + basePath
+          : '/v1/files/image' + basePath;
     }
     
     if (!original) return '';
@@ -1396,16 +1452,17 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
         const parsed = new URL(raw, window.location.origin);
         const host = String(parsed.hostname || '').toLowerCase();
         const path = String(parsed.pathname || '').trim();
-        const marker = '/v1/files/image/';
+        const fileMarkers = ['/v1/files/asset/', '/v1/files/image/', '/v1/files/video/', '/v1/files/file/'];
+        const marker = fileMarkers.find((item) => path.includes(item));
 
-        if (path.includes(marker)) {
+        if (marker) {
           return path.slice(path.indexOf(marker));
         }
         if (host === 'localhost' || host === '127.0.0.1') {
           return path || '';
         }
         if (host === 'assets.grok.com' && path) {
-          return `/v1/files/image${path.startsWith('/') ? path : `/${path}`}`;
+          return `/v1/files/asset${path.startsWith('/') ? path : `/${path}`}`;
         }
         return '';
       } catch (e) {
@@ -1413,9 +1470,18 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
       }
     }
     const basePath = raw.startsWith('/') ? raw : `/${raw}`;
-    return basePath.startsWith('/v1/files/image/')
-      ? basePath
-      : `/v1/files/image${basePath}`;
+    if (
+      basePath.startsWith('/v1/files/asset/')
+      || basePath.startsWith('/v1/files/image/')
+      || basePath.startsWith('/v1/files/video/')
+      || basePath.startsWith('/v1/files/file/')
+    ) {
+      return basePath;
+    }
+    if (basePath.startsWith('/users/')) {
+      return `/v1/files/asset${basePath}`;
+    }
+    return `/v1/files/image${basePath}`;
   }
 
   function collectRenderedImageUrlsFromCard(card) {
@@ -3526,10 +3592,38 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
         continue;
       }
       if (block.type === 'file') {
+        const attachmentId = getFileBlockAttachmentId(block);
+        if (attachmentId) {
+          const dataUrl = await resolveStoredAttachmentDataUrl(attachmentId);
+          if (!dataUrl) {
+            throw new Error('文件附件未找到，无法继续发送该上下文');
+          }
+          mapped.push({
+            type: 'file',
+            file: {
+              file_data: dataUrl,
+              filename: block.name || block.filename || 'file',
+              mime_type: block.mime || '',
+              size: Number(block.size || 0) || 0
+            },
+            attachmentId
+          });
+          continue;
+        }
         const fileData = block.file && typeof block.file === 'object'
           ? String(block.file.file_data || '').trim()
           : String(block.url || block.data || '').trim();
-        if (fileData) mapped.push({ type: 'file', file: { file_data: fileData } });
+        if (fileData) {
+          mapped.push({
+            type: 'file',
+            file: {
+              file_data: fileData,
+              filename: block.name || block.filename || '',
+              mime_type: block.mime || '',
+              size: Number(block.size || 0) || 0
+            }
+          });
+        }
       }
     }
     return mapped;
@@ -3796,16 +3890,16 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     });
   }
 
-  async function saveChatImageAttachment(file, safeName) {
+  async function saveChatFileAttachment(file, safeName) {
     if (!(file instanceof Blob)) {
-      throw new Error('图片内容不可用');
+      throw new Error('文件内容不可用');
     }
     if (storageFallbackMode) {
       const dataUrl = await blobToDataUrl(file);
       return {
         name: safeName,
         data: dataUrl,
-        mime: file.type || 'image/jpeg',
+        mime: file.type || '',
         size: Number(file.size || 0) || 0,
         stored: false
       };
@@ -3816,7 +3910,7 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     await chatSessionStore.saveAttachment(sessionId, {
       id: attachmentId,
       name: safeName,
-      mime: file.type || 'image/jpeg',
+      mime: file.type || '',
       size: Number(file.size || 0) || 0,
       blob: file,
       createdAt: Date.now(),
@@ -3825,11 +3919,19 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
     return {
       name: safeName,
       data: rememberAttachmentObjectUrl(attachmentId, file),
-      mime: file.type || 'image/jpeg',
+      mime: file.type || '',
       size: Number(file.size || 0) || 0,
       attachmentId,
       blob: file,
       stored: true
+    };
+  }
+
+  async function saveChatImageAttachment(file, safeName) {
+    const item = await saveChatFileAttachment(file, safeName);
+    return {
+      ...item,
+      mime: item.mime || 'image/jpeg'
     };
   }
 
@@ -3858,18 +3960,7 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
       if (isImage) {
         attachments.push(await saveChatImageAttachment(file, safeName));
       } else {
-        let dataUrl = '';
-        try {
-          dataUrl = await readFileAsDataUrl(file);
-        } catch (e) {
-          dataUrl = await readFileAsDataUrlFallback(file);
-        }
-        attachments.push({
-          name: safeName,
-          data: dataUrl,
-          mime: file.type || '',
-          size: Number(file.size || 0) || 0
-        });
+        attachments.push(await saveChatFileAttachment(file, safeName));
       }
       try {
         showAttachmentBadge();
@@ -4097,7 +4188,31 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
             size: Number(item.size || 0) || 0
           });
         } else {
-          blocks.push({ type: 'file', file: { file_data: item.data } });
+          const attachmentId = String(item.attachmentId || '').trim();
+          if (attachmentId && item.blob instanceof Blob && !storageFallbackMode) {
+            await chatSessionStore.saveAttachment((activeSession && activeSession.id) || '', {
+              id: attachmentId,
+              name: item.name || 'file',
+              mime: item.mime || item.blob.type || '',
+              size: Number(item.size || item.blob.size || 0) || 0,
+              blob: item.blob,
+              createdAt: Date.now(),
+              updatedAt: Date.now()
+            });
+          }
+          blocks.push({
+            type: 'file',
+            file: {
+              file_data: attachmentId ? buildIndexedDbAttachmentUrl(attachmentId) : item.data,
+              filename: item.name || 'file',
+              mime_type: item.mime || '',
+              size: Number(item.size || 0) || 0
+            },
+            attachmentId: attachmentId || undefined,
+            name: item.name || 'file',
+            mime: item.mime || '',
+            size: Number(item.size || 0) || 0
+          });
         }
       }
       content = blocks;

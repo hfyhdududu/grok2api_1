@@ -33,6 +33,9 @@ _CONTENT_TYPES = {
     ".gif": "image/gif",
     ".mp4": "video/mp4",
     ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".zip": "application/zip",
+    ".pdf": "application/pdf",
 }
 
 
@@ -44,8 +47,10 @@ class DownloadService:
         base_dir = DATA_DIR / "tmp"
         self.image_dir = base_dir / "image"
         self.video_dir = base_dir / "video"
+        self.file_dir = base_dir / "file"
         self.image_dir.mkdir(parents=True, exist_ok=True)
         self.video_dir.mkdir(parents=True, exist_ok=True)
+        self.file_dir.mkdir(parents=True, exist_ok=True)
         self._cleanup_running = False
 
     async def create(self) -> AsyncSession:
@@ -83,6 +88,30 @@ class DownloadService:
             await self.download_file(asset_url, token, media_type)
             return f"{app_url.rstrip('/')}/v1/files/{media_type}{path}"
         return asset_url
+
+    @staticmethod
+    def _route_media_type(media_type: str) -> str:
+        value = str(media_type or "").strip().lower()
+        if value in {"image", "video", "file"}:
+            return value
+        return "file"
+
+    def _cache_dir_for_media(self, media_type: str) -> Path:
+        value = self._route_media_type(media_type)
+        if value == "image":
+            return self.image_dir
+        if value == "video":
+            return self.video_dir
+        return self.file_dir
+
+    async def cache_asset_url(
+        self, path_or_url: str, token: str, media_type: str = "file"
+    ) -> str:
+        """保存 Grok 返回文件，并返回本站下载地址。"""
+        await self.download_file(path_or_url, token, media_type)
+        path = self._normalize_path(path_or_url)
+        route = self._route_media_type(media_type)
+        return f"/v1/files/{route}{path}"
 
     @staticmethod
     def _is_public_share_url(url: str) -> bool:
@@ -138,7 +167,7 @@ class DownloadService:
     ) -> Tuple[Optional[Path], str]:
         """下载公开分享直链，避免误走 assets.grok.com 反代。"""
         started_at = time.perf_counter()
-        cache_dir = self.image_dir if media_type == "image" else self.video_dir
+        cache_dir = self._cache_dir_for_media(media_type)
         filename = self._public_cache_filename(file_url, media_type)
         cache_path = cache_dir / filename
         logger.info(
@@ -370,7 +399,8 @@ class DownloadService:
         started_at = time.perf_counter()
         async with _get_download_semaphore():
             file_path = self._normalize_path(file_path)
-            cache_dir = self.image_dir if media_type == "image" else self.video_dir
+            media_type = self._route_media_type(media_type)
+            cache_dir = self._cache_dir_for_media(media_type)
             filename = file_path.lstrip("/").replace("/", "-")
             cache_path = cache_dir / filename
             logger.info(
@@ -445,7 +475,7 @@ class DownloadService:
                     total_size = 0
                     all_files: List[Tuple[Path, float, int]] = []
 
-                    for d in [self.image_dir, self.video_dir]:
+                    for d in [self.image_dir, self.video_dir, self.file_dir]:
                         if d.exists():
                             for f in d.glob("*"):
                                 if f.is_file():

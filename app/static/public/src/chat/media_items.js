@@ -30,15 +30,16 @@ export function normalizeMediaUrl(url) {
       const parsed = new URL(raw, window.location.origin);
       const host = String(parsed.hostname || '').toLowerCase();
       const path = String(parsed.pathname || '').trim();
-      const marker = '/v1/files/image/';
-      if (path.includes(marker)) {
+      const fileMarkers = ['/v1/files/asset/', '/v1/files/image/', '/v1/files/video/', '/v1/files/file/'];
+      const marker = fileMarkers.find((item) => path.includes(item));
+      if (marker) {
         return path.slice(path.indexOf(marker));
       }
       if (host === 'localhost' || host === '127.0.0.1') {
         return path || '';
       }
       if (host === 'assets.grok.com' && path) {
-        return `/v1/files/image${path.startsWith('/') ? path : `/${path}`}`;
+        return `/v1/files/asset${path.startsWith('/') ? path : `/${path}`}`;
       }
       return raw;
     } catch (error) {
@@ -46,6 +47,17 @@ export function normalizeMediaUrl(url) {
     }
   }
   const basePath = raw.startsWith('/') ? raw : `/${raw}`;
+  if (
+    basePath.startsWith('/v1/files/asset/')
+    || basePath.startsWith('/v1/files/image/')
+    || basePath.startsWith('/v1/files/video/')
+    || basePath.startsWith('/v1/files/file/')
+  ) {
+    return basePath;
+  }
+  if (basePath.startsWith('/users/')) {
+    return `/v1/files/asset${basePath}`;
+  }
   return basePath.startsWith('/v1/files/image/')
     ? basePath
     : `/v1/files/image${basePath}`;
@@ -79,7 +91,7 @@ function buildCardItem(card, fallbackKey = '') {
   const src = normalizeMediaUrl(rawSrc);
   if (!src) return null;
   const sourceHref = normalizeHttpUrl((image && (image.link || image.original)) || '');
-  const fallbackSrc = String((image && image.thumbnail) || '').trim();
+  const fallbackSrc = normalizeMediaUrl((image && image.thumbnail) || '');
   const caption = normalizeSourceText((image && image.title) || (chunk && chunk.imageTitle) || '');
   return {
     key: card && card.id ? `card:${card.id}` : fallbackKey || `url:${src}`,
@@ -93,13 +105,53 @@ function buildCardItem(card, fallbackKey = '') {
   };
 }
 
+function getFileKind(mime, contentType) {
+  const normalizedMime = String(mime || '').toLowerCase();
+  const normalizedType = String(contentType || '').toLowerCase();
+  if (normalizedMime.startsWith('image/') || normalizedType === 'image') return 'image';
+  if (normalizedMime.startsWith('video/') || normalizedType === 'video') return 'video';
+  return 'file';
+}
+
+function buildFileItem(file, fallbackKey = '') {
+  if (!file || typeof file !== 'object') return null;
+  const rawSrc = String(file.url || file.href || '').trim();
+  const src = normalizeMediaUrl(rawSrc);
+  if (!src) return null;
+  const name = normalizeSourceText(file.name || file.file_name || 'download');
+  const mime = normalizeSourceText(file.mime || file.mime_type || '');
+  const contentType = normalizeSourceText(file.contentType || file.content_type || '');
+  const size = Number(file.size || file.file_size || 0) || 0;
+  const kind = getFileKind(mime, contentType);
+  return {
+    key: fallbackKey || `file:${file.id || name}:${src}`,
+    cardId: file.id ? String(file.id) : '',
+    src,
+    alt: name || 'file',
+    caption: name || '',
+    sourceHref: '',
+    sourceLabel: '',
+    fallbackSrc: '',
+    kind,
+    name: name || 'download',
+    mime,
+    contentType,
+    size
+  };
+}
+
 export function buildMediaItems(rendering) {
   if (!rendering || typeof rendering !== 'object') return [];
   const items = [];
   const seen = new Set();
+  const seenSrc = new Set();
+  const files = Array.isArray(rendering.files) ? rendering.files : [];
+  const hasExplicitFiles = files.length > 0;
   const pushItem = (item) => {
     if (!item || !item.key || seen.has(item.key)) return;
+    if (item.src && seenSrc.has(item.src)) return;
     seen.add(item.key);
+    if (item.src) seenSrc.add(item.src);
     items.push(item);
   };
 
@@ -114,7 +166,13 @@ export function buildMediaItems(rendering) {
       cardType === 'generated_image_card'
     ) {
       pushItem(buildCardItem(card));
+    } else if (!hasExplicitFiles && (cType === 'render_file' || cardType === 'rendered_file_card')) {
+      pushItem(buildFileItem(card, card && card.id ? `file-card:${card.id}` : ''));
     }
+  });
+
+  files.forEach((file) => {
+    pushItem(buildFileItem(file));
   });
 
   const extraImages = Array.isArray(rendering.extraImages) ? rendering.extraImages : [];

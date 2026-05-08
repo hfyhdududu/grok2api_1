@@ -1,6 +1,29 @@
 import { normalizeMediaUrl } from './media_items.js';
 import { PretextLayoutEngine } from './pretext_layout.js';
 
+function formatFileSize(size) {
+  const value = Number(size || 0);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let current = value;
+  let index = 0;
+  while (current >= 1024 && index < units.length - 1) {
+    current /= 1024;
+    index += 1;
+  }
+  const digits = current >= 10 || index === 0 ? 0 : 1;
+  return `${current.toFixed(digits)} ${units[index]}`;
+}
+
+function fileIconLabel(item) {
+  const mime = String(item.mime || '').toLowerCase();
+  const name = String(item.name || item.alt || '').toLowerCase();
+  if (mime.includes('zip') || name.endsWith('.zip')) return 'ZIP';
+  if (mime.startsWith('video/')) return 'MP4';
+  if (mime.startsWith('image/')) return 'IMG';
+  return 'FILE';
+}
+
 function syncMediaCardNode(node, item) {
   node.dataset.mediaKey = item.key;
   node.classList.remove('is-broken');
@@ -66,6 +89,80 @@ function createMediaCardNode(item) {
   const card = document.createElement('figure');
   card.className = 'message-image-card';
   syncMediaCardNode(card, item);
+  return card;
+}
+
+function syncVideoCardNode(node, item) {
+  node.dataset.mediaKey = item.key;
+  node.className = 'message-file-card message-video-card';
+  node.replaceChildren();
+
+  const video = document.createElement('video');
+  video.className = 'message-file-video';
+  video.controls = true;
+  video.preload = 'metadata';
+  video.playsInline = true;
+  video.src = item.src;
+
+  const meta = document.createElement('div');
+  meta.className = 'message-file-meta';
+
+  const name = document.createElement('div');
+  name.className = 'message-file-name';
+  name.textContent = item.name || item.alt || 'video';
+
+  const sub = document.createElement('div');
+  sub.className = 'message-file-sub';
+  sub.textContent = [item.mime || 'video', formatFileSize(item.size)].filter(Boolean).join(' · ');
+
+  const link = document.createElement('a');
+  link.className = 'message-file-download';
+  link.href = item.src;
+  link.download = item.name || 'video.mp4';
+  link.textContent = '下载';
+
+  meta.append(name, sub, link);
+  node.append(video, meta);
+}
+
+function syncFileCardNode(node, item) {
+  node.dataset.mediaKey = item.key;
+  node.className = 'message-file-card';
+  node.replaceChildren();
+
+  const icon = document.createElement('div');
+  icon.className = 'message-file-icon';
+  icon.textContent = fileIconLabel(item);
+
+  const body = document.createElement('div');
+  body.className = 'message-file-body';
+
+  const name = document.createElement('div');
+  name.className = 'message-file-name';
+  name.textContent = item.name || item.alt || 'download';
+
+  const sub = document.createElement('div');
+  sub.className = 'message-file-sub';
+  sub.textContent = [item.mime || item.contentType || 'file', formatFileSize(item.size)].filter(Boolean).join(' · ');
+
+  body.append(name, sub);
+
+  const link = document.createElement('a');
+  link.className = 'message-file-download';
+  link.href = item.src;
+  link.download = item.name || 'download';
+  link.textContent = '下载';
+
+  node.append(icon, body, link);
+}
+
+function createFileCardNode(item) {
+  const card = document.createElement('figure');
+  if (item.kind === 'video') {
+    syncVideoCardNode(card, item);
+  } else {
+    syncFileCardNode(card, item);
+  }
   return card;
 }
 
@@ -228,10 +325,18 @@ export class StreamRenderer {
   getMediaNode(item) {
     const existing = this.mediaNodeCache.get(item.key);
     if (existing) {
-      syncMediaCardNode(existing, item);
+      if (item.kind === 'video') {
+        syncVideoCardNode(existing, item);
+      } else if (item.kind === 'file') {
+        syncFileCardNode(existing, item);
+      } else {
+        syncMediaCardNode(existing, item);
+      }
       return existing;
     }
-    const created = createMediaCardNode(item);
+    const created = item.kind === 'video' || item.kind === 'file'
+      ? createFileCardNode(item)
+      : createMediaCardNode(item);
     this.mediaNodeCache.set(item.key, created);
     return created;
   }

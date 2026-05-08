@@ -14,7 +14,7 @@ from app.core.logger import logger
 from app.core.config import get_config
 from app.core.exceptions import UpstreamException
 from app.services.token.service import TokenService
-from app.services.reverse.utils.headers import build_headers
+from app.services.reverse.utils.headers import build_sso_cookie
 from app.services.reverse.utils.retry import retry_on_status
 
 UPLOAD_API = "https://grok.com/rest/app-chat/upload-file"
@@ -92,7 +92,7 @@ class AssetsUploadReverse:
         url: str, headers: dict[str, str], payload: dict[str, Any], timeout: int, proxy_url: str
     ) -> "AssetsUploadReverse._SimpleResponse":
         """使用标准库 urllib 兜底上传，绕过 curl_cffi 异常。"""
-        body = json.dumps(payload).encode("utf-8")
+        body = AssetsUploadReverse._payload_bytes(payload)
         opener = None
         if proxy_url:
             opener = urllib.request.build_opener(
@@ -148,6 +148,24 @@ class AssetsUploadReverse:
         )
 
     @staticmethod
+    def _payload_bytes(payload: dict[str, Any]) -> bytes:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    @staticmethod
+    def _build_upload_headers(token: str) -> dict[str, str]:
+        user_agent = str(
+            get_config("proxy.user_agent")
+            or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        ).strip()
+        return {
+            "Content-Type": "application/json",
+            "Cookie": build_sso_cookie(token),
+            "Origin": "https://grok.com",
+            "Referer": "https://grok.com/",
+            "User-Agent": user_agent,
+        }
+
+    @staticmethod
     async def request(session: AsyncSession, token: str, fileName: str, fileMimeType: str, content: str) -> Any:
         """Upload asset to Grok.
 
@@ -172,20 +190,14 @@ class AssetsUploadReverse:
                 proxies = {"http": base_proxy, "https": base_proxy}
                 proxy_url = base_proxy
 
-            # Build headers
-            headers = build_headers(
-                cookie_token=token,
-                content_type="application/json",
-                origin="https://grok.com",
-                referer="https://grok.com/",
-            )
-
             # Build payload
             payload = {
                 "fileName": fileName,
-                "fileMimeType": fileMimeType,
+                "fileMimeType": fileMimeType or "",
                 "content": content,
             }
+            body = AssetsUploadReverse._payload_bytes(payload)
+            headers = AssetsUploadReverse._build_upload_headers(token)
             logger.info(
                 "AssetsUpload request prepared: "
                 f"fileName={fileName}, fileMimeType={fileMimeType}, content_len={len(content or '')}"
@@ -201,7 +213,7 @@ class AssetsUploadReverse:
                         response = await session.post(
                             UPLOAD_API,
                             headers=headers,
-                            json=payload,
+                            data=body,
                             proxies=proxies,
                             timeout=timeout,
                             impersonate=browser,
@@ -216,7 +228,7 @@ class AssetsUploadReverse:
                             response = await session.post(
                                 UPLOAD_API,
                                 headers=headers,
-                                json=payload,
+                                data=body,
                                 timeout=timeout,
                             )
                         except Exception as second_err:
@@ -274,7 +286,7 @@ class AssetsUploadReverse:
                             response = await session.post(
                                 UPLOAD_API,
                                 headers=headers,
-                                json=payload,
+                                data=body,
                                 timeout=timeout,
                             )
                             if response.status_code == 200:

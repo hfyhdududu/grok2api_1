@@ -9,8 +9,9 @@ import hashlib
 import io
 import mimetypes
 import re
+import zipfile
 from pathlib import Path
-from typing import AsyncIterator, Optional, Tuple
+from typing import Any, AsyncIterator, Optional, Tuple
 from urllib.parse import urlparse
 
 import aiofiles
@@ -148,6 +149,20 @@ class UploadService:
             return width, height, len(raw)
         except Exception as e:
             raise ValidationException(f"Image inspect failed: {e}")
+
+    @staticmethod
+    def _zip_single_file(filename: str, b64: str) -> Tuple[str, str, str]:
+        """把触发防护的视频放进压缩包，保持文件本体不转码。"""
+        try:
+            raw = base64.b64decode(re.sub(r"\s+", "", b64), validate=True)
+        except Exception:
+            raise ValidationException("Invalid file base64 content")
+        safe_name = (filename or "file").replace("\\", "-").replace("/", "-")
+        zip_name = f"{safe_name.rsplit('.', 1)[0] or 'file'}.zip"
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(safe_name or "file", raw)
+        return zip_name, base64.b64encode(out.getvalue()).decode(), "application/x-zip-compressed"
 
     @staticmethod
     def _extract_upstream_rejection_hint(exc: Exception) -> str:
@@ -342,7 +357,11 @@ class UploadService:
             raise UpstreamException(f"Fetch failed: {str(e)}", details={"url": url})
 
     @staticmethod
-    def format_b64(data_uri: str) -> Tuple[str, str, str]:
+    def format_b64(
+        data_uri: str,
+        filename: str | None = None,
+        mime_override: str | None = None,
+    ) -> Tuple[str, str, str]:
         """Format data URI to (filename, base64, mime)."""
         if not data_uri.startswith("data:"):
             raise ValidationException("Invalid file input: not a data URI")
@@ -355,15 +374,41 @@ class UploadService:
         if ";base64" not in header:
             raise ValidationException("Invalid data URI: missing base64 marker")
 
-        mime = header[5:].split(";", 1)[0] or "application/octet-stream"
+        mime = (mime_override if mime_override is not None else header[5:].split(";", 1)[0]).strip()
         b64 = re.sub(r"\s+", "", b64)
-        if not mime or not b64:
+        if not b64:
             raise ValidationException("Invalid data URI: empty content")
-        ext = mime.split("/")[-1] if "/" in mime else "bin"
-        return f"file.{ext}", b64, mime
+        ext = mime.split("/")[-1] if mime and "/" in mime else "bin"
+        return filename or f"file.{ext}", b64, mime
 
-    async def check_format(self, file_input: str) -> Tuple[str, str, str]:
+    async def check_format(self, file_input: Any) -> Tuple[str, str, str]:
         """Check file input format and return (filename, base64, mime)."""
+        if isinstance(file_input, dict):
+            data = str(
+                file_input.get("data")
+                or file_input.get("file_data")
+                or file_input.get("url")
+                or ""
+            ).strip()
+            filename = str(
+                file_input.get("filename")
+                or file_input.get("name")
+                or ""
+            ).strip() or None
+            mime = str(
+                file_input.get("mime_type")
+                or file_input.get("mime")
+                or ""
+            ).strip() or None
+            if not data:
+                raise ValidationException("Invalid file input: empty content")
+            if self._is_url(data):
+                resolved_name, b64, resolved_mime = await self.parse_b64(data)
+                return filename or resolved_name, b64, mime or resolved_mime
+            if data.startswith("data:"):
+                return self.format_b64(data, filename=filename, mime_override=mime)
+            raise ValidationException("Invalid file input: must be URL or base64")
+
         if not isinstance(file_input, str) or not file_input.strip():
             raise ValidationException("Invalid file input: empty content")
 
@@ -375,7 +420,7 @@ class UploadService:
 
         raise ValidationException("Invalid file input: must be URL or base64")
 
-    async def upload_file(self, file_input: str, token: str) -> Tuple[str, str]:
+    async def upload_file(self, file_input: Any, token: str) -> Tuple[str, str]:
         """
         Upload file to Grok.
 
@@ -426,7 +471,7 @@ class UploadService:
                 hint = (e.details or {}).get("hint", "")
                 normalized_hint = self._extract_upstream_rejection_hint(e) or hint
                 logger.warning(
-                    "Upload image upstream rejected: "
+                    "Upload upstream rejected: "
                     "filename={}, status={}, hint={}, body={}",
                     filename,
                     status,
@@ -439,6 +484,33 @@ class UploadService:
                         param="image",
                         code="content_moderated",
                     )
+                if (
+                    normalized_hint == "Cloudflare challenge page"
+                    and str(mime or "").lower().startswith("video/")
+                ):
+                    zip_name, zip_b64, zip_mime = self._zip_single_file(filename, b64)
+                    logger.warning(
+                        "Upload video fallback zip retry: "
+                        "filename={}, zip_name={}, original_mime={}, zip_len={}",
+                        filename,
+                        zip_name,
+                        mime,
+                        len(zip_b64),
+                    )
+                    response = await AssetsUploadReverse.request(
+                        session,
+                        token,
+                        zip_name,
+                        zip_mime,
+                        zip_b64,
+                    )
+                    result = response.json()
+                    file_id = result.get("fileMetadataId", "")
+                    file_uri = result.get("fileUri", "")
+                    logger.info(
+                        f"Upload success after video zip fallback: {zip_name} -> {file_id}"
+                    )
+                    return file_id, file_uri
                 if mime != "image/jpeg" or status not in (400, 403):
                     raise
 

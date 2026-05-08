@@ -295,13 +295,104 @@ def extract_sources_payload(model_response: Dict[str, Any]) -> Dict[str, Any] | 
     return None
 
 
+def _extract_render_files(model_response: Dict[str, Any]) -> List[Dict[str, Any]]:
+    files: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for card in _parse_card_attachments_json(model_response.get("cardAttachmentsJson")):
+        if not isinstance(card, dict):
+            continue
+        if str(card.get("type") or "") != "render_file":
+            continue
+        name = str(card.get("file_name") or card.get("name") or "download").strip()
+        url = str(card.get("url") or "").strip()
+        mime = str(card.get("mime_type") or "").strip()
+        content_type = str(card.get("content_type") or "").strip()
+        if not url:
+            continue
+        key = f"{name}|{url}"
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            size = int(card.get("file_size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        files.append(
+            {
+                "id": str(card.get("id") or key).strip(),
+                "name": name,
+                "url": url,
+                "mime": mime,
+                "contentType": content_type,
+                "size": size,
+                "thumbnailUrl": str(card.get("thumbnail_url") or "").strip(),
+                "thumbnailDarkUrl": str(card.get("thumbnail_dark_url") or "").strip(),
+            }
+        )
+    return files
+
+
 def extract_render_payload(model_response: Dict[str, Any]) -> Dict[str, Any] | None:
     if not isinstance(model_response, dict) or not model_response:
         return None
     return {
         "rawModelResponse": model_response,
         "extraImages": proc_base._collect_images(model_response),
+        "files": _extract_render_files(model_response),
     }
+
+
+def _render_file_media_type(file_info: Dict[str, Any]) -> str:
+    mime = str(file_info.get("mime") or file_info.get("mime_type") or "").lower()
+    content_type = str(
+        file_info.get("contentType") or file_info.get("content_type") or ""
+    ).lower()
+    name = str(file_info.get("name") or file_info.get("file_name") or "").lower()
+    if mime.startswith("image/") or content_type == "image":
+        return "image"
+    if mime.startswith("video/") or content_type == "video":
+        return "video"
+    if name.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
+        return "image"
+    if name.endswith((".mp4", ".webm", ".mov")):
+        return "video"
+    return "file"
+
+
+async def _cache_render_files(
+    render_payload: Dict[str, Any] | None,
+    token: str,
+    dl_service: Any,
+) -> Dict[str, Any] | None:
+    if not render_payload or not isinstance(render_payload, dict):
+        return render_payload
+    files = render_payload.get("files")
+    if not isinstance(files, list) or not files:
+        return render_payload
+
+    cached_files: List[Dict[str, Any]] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        cached = dict(item)
+        original_url = str(cached.get("url") or "").strip()
+        if original_url:
+            cached.setdefault("originalUrl", original_url)
+            try:
+                cached["url"] = await dl_service.cache_asset_url(
+                    original_url,
+                    token,
+                    _render_file_media_type(cached),
+                )
+                cached["cached"] = True
+            except Exception as exc:
+                cached["cached"] = False
+                logger.warning(f"Render file cache failed: {original_url} {exc}")
+        cached_files.append(cached)
+
+    render_payload = dict(render_payload)
+    render_payload["files"] = cached_files
+    return render_payload
 
 
 def _extract_stream_response(data: Any) -> Dict[str, Any] | None:
@@ -429,13 +520,13 @@ class MessageExtractor:
         tools: List[Dict[str, Any]] = None,
         tool_choice: Any = None,
         parallel_tool_calls: bool = True,
-    ) -> tuple[str, List[str], List[str]]:
+    ) -> tuple[str, List[Any], List[str]]:
         """从 OpenAI 消息格式提取内容，返回 (text, file_attachments, image_attachments)"""
         if tools:
             messages = format_tool_history(messages)
 
         texts = []
-        file_attachments: List[str] = []
+        file_attachments: List[Any] = []
         image_attachments: List[str] = []
         extracted = []
 
@@ -481,7 +572,14 @@ class MessageExtractor:
                         file_data = item.get("file", {})
                         raw = file_data.get("file_data", "")
                         if raw:
-                            file_attachments.append(raw)
+                            file_attachments.append(
+                                {
+                                    "data": raw,
+                                    "filename": file_data.get("filename") or file_data.get("name"),
+                                    "mime_type": file_data.get("mime_type") or file_data.get("mime"),
+                                    "size": file_data.get("size"),
+                                }
+                            )
             elif isinstance(content, list):
                 for item in content:
                     item_type = item.get("type", "")
@@ -506,7 +604,14 @@ class MessageExtractor:
                         file_data = item.get("file", {})
                         raw = file_data.get("file_data", "")
                         if raw:
-                            file_attachments.append(raw)
+                            file_attachments.append(
+                                {
+                                    "data": raw,
+                                    "filename": file_data.get("filename") or file_data.get("name"),
+                                    "mime_type": file_data.get("mime_type") or file_data.get("mime"),
+                                    "size": file_data.get("size"),
+                                }
+                            )
 
             tool_calls = msg.get("tool_calls")
             if role == "assistant" and not parts and isinstance(tool_calls, list):
@@ -1187,6 +1292,9 @@ class StreamProcessor(proc_base.BaseProcessor):
                 if mr := resp.get("modelResponse"):
                     render_payload = extract_render_payload(mr)
                     if render_payload:
+                        render_payload = await _cache_render_files(
+                            render_payload, self.token, self._get_dl()
+                        )
                         yield self._sse(rendering=render_payload)
                     if self.image_think_active and self.think_opened:
                         async for chunk in self._close_think_block():
@@ -1570,6 +1678,10 @@ class CollectProcessor(proc_base.BaseProcessor):
 
         sources_payload = extract_sources_payload(final_model_response)
         render_payload = extract_render_payload(final_model_response)
+        if render_payload:
+            render_payload = await _cache_render_files(
+                render_payload, self.token, self._get_dl()
+            )
         message_obj = {
             "role": "assistant",
             "content": content,

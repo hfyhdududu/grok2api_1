@@ -29,15 +29,16 @@
         const parsed = new URL(raw, window.location.origin);
         const host = String(parsed.hostname || "").toLowerCase();
         const path = String(parsed.pathname || "").trim();
-        const marker = "/v1/files/image/";
-        if (path.includes(marker)) {
+        const fileMarkers = ["/v1/files/asset/", "/v1/files/image/", "/v1/files/video/", "/v1/files/file/"];
+        const marker = fileMarkers.find((item) => path.includes(item));
+        if (marker) {
           return path.slice(path.indexOf(marker));
         }
         if (host === "localhost" || host === "127.0.0.1") {
           return path || "";
         }
         if (host === "assets.grok.com" && path) {
-          return `/v1/files/image${path.startsWith("/") ? path : `/${path}`}`;
+          return `/v1/files/asset${path.startsWith("/") ? path : `/${path}`}`;
         }
         return raw;
       } catch (error) {
@@ -45,6 +46,12 @@
       }
     }
     const basePath = raw.startsWith("/") ? raw : `/${raw}`;
+    if (basePath.startsWith("/v1/files/asset/") || basePath.startsWith("/v1/files/image/") || basePath.startsWith("/v1/files/video/") || basePath.startsWith("/v1/files/file/")) {
+      return basePath;
+    }
+    if (basePath.startsWith("/users/")) {
+      return `/v1/files/asset${basePath}`;
+    }
     return basePath.startsWith("/v1/files/image/") ? basePath : `/v1/files/image${basePath}`;
   }
   function parseRenderingCards(rendering) {
@@ -69,7 +76,7 @@
     const src = normalizeMediaUrl(rawSrc);
     if (!src) return null;
     const sourceHref = normalizeHttpUrl(image && (image.link || image.original) || "");
-    const fallbackSrc = String(image && image.thumbnail || "").trim();
+    const fallbackSrc = normalizeMediaUrl(image && image.thumbnail || "");
     const caption = normalizeSourceText(image && image.title || chunk && chunk.imageTitle || "");
     return {
       key: card && card.id ? `card:${card.id}` : fallbackKey || `url:${src}`,
@@ -82,13 +89,51 @@
       fallbackSrc
     };
   }
+  function getFileKind(mime, contentType) {
+    const normalizedMime = String(mime || "").toLowerCase();
+    const normalizedType = String(contentType || "").toLowerCase();
+    if (normalizedMime.startsWith("image/") || normalizedType === "image") return "image";
+    if (normalizedMime.startsWith("video/") || normalizedType === "video") return "video";
+    return "file";
+  }
+  function buildFileItem(file, fallbackKey = "") {
+    if (!file || typeof file !== "object") return null;
+    const rawSrc = String(file.url || file.href || "").trim();
+    const src = normalizeMediaUrl(rawSrc);
+    if (!src) return null;
+    const name = normalizeSourceText(file.name || file.file_name || "download");
+    const mime = normalizeSourceText(file.mime || file.mime_type || "");
+    const contentType = normalizeSourceText(file.contentType || file.content_type || "");
+    const size = Number(file.size || file.file_size || 0) || 0;
+    const kind = getFileKind(mime, contentType);
+    return {
+      key: fallbackKey || `file:${file.id || name}:${src}`,
+      cardId: file.id ? String(file.id) : "",
+      src,
+      alt: name || "file",
+      caption: name || "",
+      sourceHref: "",
+      sourceLabel: "",
+      fallbackSrc: "",
+      kind,
+      name: name || "download",
+      mime,
+      contentType,
+      size
+    };
+  }
   function buildMediaItems(rendering) {
     if (!rendering || typeof rendering !== "object") return [];
     const items = [];
     const seen = /* @__PURE__ */ new Set();
+    const seenSrc = /* @__PURE__ */ new Set();
+    const files = Array.isArray(rendering.files) ? rendering.files : [];
+    const hasExplicitFiles = files.length > 0;
     const pushItem = (item) => {
       if (!item || !item.key || seen.has(item.key)) return;
+      if (item.src && seenSrc.has(item.src)) return;
       seen.add(item.key);
+      if (item.src) seenSrc.add(item.src);
       items.push(item);
     };
     const cardMap = parseRenderingCards(rendering);
@@ -97,7 +142,12 @@
       const cardType = String(card && card.cardType || "");
       if (cType === "render_searched_image" || cType === "render_edited_image" || cType === "render_generated_image" || cardType === "generated_image_card") {
         pushItem(buildCardItem(card));
+      } else if (!hasExplicitFiles && (cType === "render_file" || cardType === "rendered_file_card")) {
+        pushItem(buildFileItem(card, card && card.id ? `file-card:${card.id}` : ""));
       }
+    });
+    files.forEach((file) => {
+      pushItem(buildFileItem(file));
     });
     const extraImages = Array.isArray(rendering.extraImages) ? rendering.extraImages : [];
     extraImages.forEach((url) => {
@@ -2731,6 +2781,27 @@
   }
 
   // app/static/public/src/chat/stream_renderer.js
+  function formatFileSize(size) {
+    const value = Number(size || 0);
+    if (!Number.isFinite(value) || value <= 0) return "";
+    const units = ["B", "KB", "MB", "GB"];
+    let current = value;
+    let index = 0;
+    while (current >= 1024 && index < units.length - 1) {
+      current /= 1024;
+      index += 1;
+    }
+    const digits = current >= 10 || index === 0 ? 0 : 1;
+    return `${current.toFixed(digits)} ${units[index]}`;
+  }
+  function fileIconLabel(item) {
+    const mime = String(item.mime || "").toLowerCase();
+    const name = String(item.name || item.alt || "").toLowerCase();
+    if (mime.includes("zip") || name.endsWith(".zip")) return "ZIP";
+    if (mime.startsWith("video/")) return "MP4";
+    if (mime.startsWith("image/")) return "IMG";
+    return "FILE";
+  }
   function syncMediaCardNode(node, item) {
     node.dataset.mediaKey = item.key;
     node.classList.remove("is-broken");
@@ -2793,6 +2864,64 @@
     const card = document.createElement("figure");
     card.className = "message-image-card";
     syncMediaCardNode(card, item);
+    return card;
+  }
+  function syncVideoCardNode(node, item) {
+    node.dataset.mediaKey = item.key;
+    node.className = "message-file-card message-video-card";
+    node.replaceChildren();
+    const video = document.createElement("video");
+    video.className = "message-file-video";
+    video.controls = true;
+    video.preload = "metadata";
+    video.playsInline = true;
+    video.src = item.src;
+    const meta = document.createElement("div");
+    meta.className = "message-file-meta";
+    const name = document.createElement("div");
+    name.className = "message-file-name";
+    name.textContent = item.name || item.alt || "video";
+    const sub = document.createElement("div");
+    sub.className = "message-file-sub";
+    sub.textContent = [item.mime || "video", formatFileSize(item.size)].filter(Boolean).join(" \xB7 ");
+    const link = document.createElement("a");
+    link.className = "message-file-download";
+    link.href = item.src;
+    link.download = item.name || "video.mp4";
+    link.textContent = "\u4E0B\u8F7D";
+    meta.append(name, sub, link);
+    node.append(video, meta);
+  }
+  function syncFileCardNode(node, item) {
+    node.dataset.mediaKey = item.key;
+    node.className = "message-file-card";
+    node.replaceChildren();
+    const icon = document.createElement("div");
+    icon.className = "message-file-icon";
+    icon.textContent = fileIconLabel(item);
+    const body = document.createElement("div");
+    body.className = "message-file-body";
+    const name = document.createElement("div");
+    name.className = "message-file-name";
+    name.textContent = item.name || item.alt || "download";
+    const sub = document.createElement("div");
+    sub.className = "message-file-sub";
+    sub.textContent = [item.mime || item.contentType || "file", formatFileSize(item.size)].filter(Boolean).join(" \xB7 ");
+    body.append(name, sub);
+    const link = document.createElement("a");
+    link.className = "message-file-download";
+    link.href = item.src;
+    link.download = item.name || "download";
+    link.textContent = "\u4E0B\u8F7D";
+    node.append(icon, body, link);
+  }
+  function createFileCardNode(item) {
+    const card = document.createElement("figure");
+    if (item.kind === "video") {
+      syncVideoCardNode(card, item);
+    } else {
+      syncFileCardNode(card, item);
+    }
     return card;
   }
   function syncOrderedChildren(parent, desiredNodes) {
@@ -2935,10 +3064,16 @@
     getMediaNode(item) {
       const existing = this.mediaNodeCache.get(item.key);
       if (existing) {
-        syncMediaCardNode(existing, item);
+        if (item.kind === "video") {
+          syncVideoCardNode(existing, item);
+        } else if (item.kind === "file") {
+          syncFileCardNode(existing, item);
+        } else {
+          syncMediaCardNode(existing, item);
+        }
         return existing;
       }
-      const created = createMediaCardNode(item);
+      const created = item.kind === "video" || item.kind === "file" ? createFileCardNode(item) : createMediaCardNode(item);
       this.mediaNodeCache.set(item.key, created);
       return created;
     }
@@ -3447,6 +3582,12 @@
       const imageUrl = block.image_url && typeof block.image_url === "object" ? String(block.image_url.url || "").trim() : String(block.url || "").trim();
       return parseIndexedDbAttachmentUrl(imageUrl);
     }
+    function getFileBlockAttachmentId(block) {
+      if (!block || typeof block !== "object") return "";
+      if (block.attachmentId) return String(block.attachmentId || "").trim();
+      const fileData = block.file && typeof block.file === "object" ? String(block.file.file_data || "").trim() : String(block.url || block.data || "").trim();
+      return parseIndexedDbAttachmentUrl(fileData);
+    }
     function rememberAttachmentObjectUrl(attachmentId, blob) {
       const id = String(attachmentId || "").trim();
       if (!id || !(blob instanceof Blob)) return "";
@@ -3468,12 +3609,12 @@
     function blobToDataUrl(blob) {
       return new Promise((resolve, reject) => {
         if (!(blob instanceof Blob)) {
-          reject(new Error("\u56FE\u7247\u5185\u5BB9\u4E0D\u53EF\u7528"));
+          reject(new Error("\u6587\u4EF6\u5185\u5BB9\u4E0D\u53EF\u7528"));
           return;
         }
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result || ""));
-        reader.onerror = () => reject(reader.error || new Error("\u8BFB\u53D6\u56FE\u7247\u5931\u8D25"));
+        reader.onerror = () => reject(reader.error || new Error("\u8BFB\u53D6\u6587\u4EF6\u5931\u8D25"));
         reader.readAsDataURL(blob);
       });
     }
@@ -3529,12 +3670,14 @@
           } : { type: "image_url", persistedPreview: false };
         }
         if (block.type === "file") {
+          const attachmentId = getFileBlockAttachmentId(block);
           return {
             type: "file",
             name: trimPersistText(block.name || block.filename || "", 256),
             mime: trimPersistText(block.mime || "", 128),
             size: Number(block.size || 0) || 0,
-            url: sanitizePersistUrl(block.url || "")
+            attachmentId: attachmentId || void 0,
+            url: attachmentId ? buildIndexedDbAttachmentUrl(attachmentId) : sanitizePersistUrl(block.url || "")
           };
         }
         return null;
@@ -3560,6 +3703,18 @@
       if (Array.isArray(rendering.extraImages)) {
         sanitized.extraImages = rendering.extraImages.map((item) => sanitizePersistUrl(item)).filter(Boolean).slice(0, 24);
       }
+      if (Array.isArray(rendering.files)) {
+        sanitized.files = rendering.files.slice(0, 24).map((item) => ({
+          id: trimPersistText(item && item.id || "", 256),
+          name: trimPersistText(item && item.name || "", 256),
+          url: sanitizePersistUrl(item && item.url || ""),
+          mime: trimPersistText(item && item.mime || "", 128),
+          contentType: trimPersistText(item && item.contentType || "", 64),
+          size: Number(item && item.size || 0) || 0,
+          thumbnailUrl: sanitizePersistUrl(item && item.thumbnailUrl || ""),
+          thumbnailDarkUrl: sanitizePersistUrl(item && item.thumbnailDarkUrl || "")
+        })).filter((item) => item.url);
+      }
       const rawModelResponse = rendering.rawModelResponse && typeof rendering.rawModelResponse === "object" ? rendering.rawModelResponse : null;
       if (rawModelResponse) {
         sanitized.rawModelResponse = {
@@ -3582,7 +3737,12 @@
           caption: trimPersistText(item && item.caption || "", 512),
           sourceHref: sanitizePersistUrl(item && item.sourceHref || ""),
           sourceLabel: trimPersistText(item && item.sourceLabel || "", 256),
-          fallbackSrc: sanitizePersistUrl(item && item.fallbackSrc || "")
+          fallbackSrc: sanitizePersistUrl(item && item.fallbackSrc || ""),
+          kind: trimPersistText(item && item.kind || "", 32),
+          name: trimPersistText(item && item.name || "", 256),
+          mime: trimPersistText(item && item.mime || "", 128),
+          contentType: trimPersistText(item && item.contentType || "", 64),
+          size: Number(item && item.size || 0) || 0
         })).filter((item) => item.src || item.cardId) : []
       };
     }
@@ -3828,9 +3988,32 @@
             placeholderLabel: "\u56FE\u7247\u9644\u4EF6\u672A\u7F13\u5B58"
           });
         }
-        if (block.type === "file" && (block.data || block.url)) {
-          results.push({ mime: block.mime || "", name: block.name || "file", data: block.data || block.url });
-        } else if (block.type === "file") {
+        if (block.type === "file") {
+          const attachmentId = getFileBlockAttachmentId(block);
+          if (attachmentId) {
+            const preview = await resolveStoredAttachmentPreview(attachmentId);
+            if (preview) {
+              results.push({
+                ...preview,
+                name: block.name || preview.name || "file",
+                mime: block.mime || preview.mime || "",
+                size: Number(block.size || preview.size || 0) || 0
+              });
+              continue;
+            }
+            results.push({
+              mime: block.mime || "",
+              name: block.name || "file",
+              placeholder: true,
+              placeholderLabel: "\u6587\u4EF6\u9644\u4EF6\u672A\u7F13\u5B58",
+              size: Number(block.size || 0) || 0
+            });
+            continue;
+          }
+          if (block.data || block.url) {
+            results.push({ mime: block.mime || "", name: block.name || "file", data: block.data || block.url });
+            continue;
+          }
           results.push({
             mime: block.mime || "",
             name: block.name || "file",
@@ -4513,7 +4696,7 @@
       }
       if (original && !original.startsWith("http")) {
         let basePath = original.startsWith("/") ? original : "/" + original;
-        original = "/v1/files/image" + basePath;
+        original = basePath.startsWith("/users/") ? "/v1/files/asset" + basePath : "/v1/files/image" + basePath;
       }
       if (!original) return "";
       return `
@@ -4562,15 +4745,16 @@
           const parsed = new URL(raw, window.location.origin);
           const host = String(parsed.hostname || "").toLowerCase();
           const path = String(parsed.pathname || "").trim();
-          const marker = "/v1/files/image/";
-          if (path.includes(marker)) {
+          const fileMarkers = ["/v1/files/asset/", "/v1/files/image/", "/v1/files/video/", "/v1/files/file/"];
+          const marker = fileMarkers.find((item) => path.includes(item));
+          if (marker) {
             return path.slice(path.indexOf(marker));
           }
           if (host === "localhost" || host === "127.0.0.1") {
             return path || "";
           }
           if (host === "assets.grok.com" && path) {
-            return `/v1/files/image${path.startsWith("/") ? path : `/${path}`}`;
+            return `/v1/files/asset${path.startsWith("/") ? path : `/${path}`}`;
           }
           return "";
         } catch (e) {
@@ -4578,7 +4762,13 @@
         }
       }
       const basePath = raw.startsWith("/") ? raw : `/${raw}`;
-      return basePath.startsWith("/v1/files/image/") ? basePath : `/v1/files/image${basePath}`;
+      if (basePath.startsWith("/v1/files/asset/") || basePath.startsWith("/v1/files/image/") || basePath.startsWith("/v1/files/video/") || basePath.startsWith("/v1/files/file/")) {
+        return basePath;
+      }
+      if (basePath.startsWith("/users/")) {
+        return `/v1/files/asset${basePath}`;
+      }
+      return `/v1/files/image${basePath}`;
     }
     function collectRenderedImageUrlsFromCard(card) {
       const urls = [];
@@ -6479,8 +6669,36 @@ ${renderedAnswer}`.trim();
           continue;
         }
         if (block.type === "file") {
+          const attachmentId = getFileBlockAttachmentId(block);
+          if (attachmentId) {
+            const dataUrl = await resolveStoredAttachmentDataUrl(attachmentId);
+            if (!dataUrl) {
+              throw new Error("\u6587\u4EF6\u9644\u4EF6\u672A\u627E\u5230\uFF0C\u65E0\u6CD5\u7EE7\u7EED\u53D1\u9001\u8BE5\u4E0A\u4E0B\u6587");
+            }
+            mapped.push({
+              type: "file",
+              file: {
+                file_data: dataUrl,
+                filename: block.name || block.filename || "file",
+                mime_type: block.mime || "",
+                size: Number(block.size || 0) || 0
+              },
+              attachmentId
+            });
+            continue;
+          }
           const fileData = block.file && typeof block.file === "object" ? String(block.file.file_data || "").trim() : String(block.url || block.data || "").trim();
-          if (fileData) mapped.push({ type: "file", file: { file_data: fileData } });
+          if (fileData) {
+            mapped.push({
+              type: "file",
+              file: {
+                file_data: fileData,
+                filename: block.name || block.filename || "",
+                mime_type: block.mime || "",
+                size: Number(block.size || 0) || 0
+              }
+            });
+          }
         }
       }
       return mapped;
@@ -6717,16 +6935,16 @@ ${renderedAnswer}`.trim();
         reader.readAsArrayBuffer(file);
       });
     }
-    async function saveChatImageAttachment(file, safeName) {
+    async function saveChatFileAttachment(file, safeName) {
       if (!(file instanceof Blob)) {
-        throw new Error("\u56FE\u7247\u5185\u5BB9\u4E0D\u53EF\u7528");
+        throw new Error("\u6587\u4EF6\u5185\u5BB9\u4E0D\u53EF\u7528");
       }
       if (storageFallbackMode) {
         const dataUrl = await blobToDataUrl(file);
         return {
           name: safeName,
           data: dataUrl,
-          mime: file.type || "image/jpeg",
+          mime: file.type || "",
           size: Number(file.size || 0) || 0,
           stored: false
         };
@@ -6737,7 +6955,7 @@ ${renderedAnswer}`.trim();
       await chatSessionStore.saveAttachment(sessionId, {
         id: attachmentId,
         name: safeName,
-        mime: file.type || "image/jpeg",
+        mime: file.type || "",
         size: Number(file.size || 0) || 0,
         blob: file,
         createdAt: Date.now(),
@@ -6746,11 +6964,18 @@ ${renderedAnswer}`.trim();
       return {
         name: safeName,
         data: rememberAttachmentObjectUrl(attachmentId, file),
-        mime: file.type || "image/jpeg",
+        mime: file.type || "",
         size: Number(file.size || 0) || 0,
         attachmentId,
         blob: file,
         stored: true
+      };
+    }
+    async function saveChatImageAttachment(file, safeName) {
+      const item = await saveChatFileAttachment(file, safeName);
+      return {
+        ...item,
+        mime: item.mime || "image/jpeg"
       };
     }
     function buildUniqueFileName(name) {
@@ -6776,18 +7001,7 @@ ${renderedAnswer}`.trim();
         if (isImage) {
           attachments.push(await saveChatImageAttachment(file, safeName));
         } else {
-          let dataUrl = "";
-          try {
-            dataUrl = await readFileAsDataUrl(file);
-          } catch (e) {
-            dataUrl = await readFileAsDataUrlFallback(file);
-          }
-          attachments.push({
-            name: safeName,
-            data: dataUrl,
-            mime: file.type || "",
-            size: Number(file.size || 0) || 0
-          });
+          attachments.push(await saveChatFileAttachment(file, safeName));
         }
         try {
           showAttachmentBadge();
@@ -6998,7 +7212,31 @@ ${renderedAnswer}`.trim();
               size: Number(item.size || 0) || 0
             });
           } else {
-            blocks.push({ type: "file", file: { file_data: item.data } });
+            const attachmentId = String(item.attachmentId || "").trim();
+            if (attachmentId && item.blob instanceof Blob && !storageFallbackMode) {
+              await chatSessionStore.saveAttachment(activeSession && activeSession.id || "", {
+                id: attachmentId,
+                name: item.name || "file",
+                mime: item.mime || item.blob.type || "",
+                size: Number(item.size || item.blob.size || 0) || 0,
+                blob: item.blob,
+                createdAt: Date.now(),
+                updatedAt: Date.now()
+              });
+            }
+            blocks.push({
+              type: "file",
+              file: {
+                file_data: attachmentId ? buildIndexedDbAttachmentUrl(attachmentId) : item.data,
+                filename: item.name || "file",
+                mime_type: item.mime || "",
+                size: Number(item.size || 0) || 0
+              },
+              attachmentId: attachmentId || void 0,
+              name: item.name || "file",
+              mime: item.mime || "",
+              size: Number(item.size || 0) || 0
+            });
           }
         }
         content = blocks;
