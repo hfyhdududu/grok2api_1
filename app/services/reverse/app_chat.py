@@ -398,7 +398,16 @@ class AppChatReverse:
             async def stream_response():
                 try:
                     async for line in response.aiter_lines():
-                        yield line
+                        if line is None:
+                            continue
+                        if isinstance(line, (bytes, bytearray)):
+                            text = line.decode("utf-8", errors="ignore")
+                        else:
+                            text = str(line)
+                        for item in text.splitlines():
+                            item = item.strip()
+                            if item:
+                                yield item
                 finally:
                     try:
                         close_fn = getattr(response, "aclose", None)

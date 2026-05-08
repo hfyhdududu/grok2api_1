@@ -404,6 +404,24 @@ def _extract_stream_response(data: Any) -> Dict[str, Any] | None:
         return None
     response = result.get("response")
     if not isinstance(response, dict):
+        direct_keys = {
+            "token",
+            "modelResponse",
+            "cardAttachment",
+            "toolUsageCard",
+            "toolUsageCardId",
+            "messageTag",
+            "llmInfo",
+            "rolloutId",
+            "responseId",
+            "uiLayout",
+            "finalMetadata",
+            "progressReport",
+            "codeExecutionResult",
+            "streamingImageGenerationResponse",
+        }
+        if any(key in result for key in direct_keys):
+            return result
         return None
     return response
 
@@ -1471,9 +1489,15 @@ class StreamProcessor(proc_base.BaseProcessor):
             return
 
         assistant: Dict[str, Any] | None = None
+        emitted_content = ""
+        sent_rendering = False
+        sent_response_id = ""
         browser = get_config("proxy.browser")
+        max_wait = max(6.0, float(get_config("chat.stream_timeout") or 60.0))
+        poll_interval = 0.5
+        max_attempts = max(1, int(max_wait / poll_interval))
         async with AsyncSession(impersonate=browser) as session:
-            for attempt in range(6):
+            for attempt in range(max_attempts):
                 payload = await AppChatReverse.fetch_responses(
                     session,
                     self.token,
@@ -1483,37 +1507,49 @@ class StreamProcessor(proc_base.BaseProcessor):
                 if isinstance(responses, list):
                     assistant = self._find_follow_up_fallback(responses)
                     if assistant:
-                        break
-                if attempt < 5:
-                    await asyncio.sleep(1)
+                        response_id = _clean_id(assistant.get("responseId"))
+                        if response_id and response_id != sent_response_id:
+                            sent_response_id = response_id
+                            self.response_id = response_id
+                            self._parent_response_id = response_id
+                            yield self._sse(grok=self._grok_metadata())
+
+                        if not self.role_sent:
+                            yield self._sse(role="assistant", grok=self._grok_metadata())
+                            self.role_sent = True
+
+                        if not sent_rendering:
+                            render_payload = extract_render_payload(assistant)
+                            if render_payload:
+                                render_payload = await _cache_render_files(
+                                    render_payload, self.token, self._get_dl()
+                                )
+                                yield self._sse(rendering=render_payload)
+                            sent_rendering = True
+
+                        content = str(assistant.get("message") or "")
+                        if content and content != emitted_content:
+                            if self.think_opened:
+                                async for chunk in self._close_think_block():
+                                    yield chunk
+                            if content.startswith(emitted_content):
+                                delta = content[len(emitted_content):]
+                            elif not emitted_content:
+                                delta = content
+                            else:
+                                delta = ""
+                            if delta:
+                                emitted_content = content
+                                self._remember_answer_text(delta)
+                                yield self._sse(delta)
+
+                        if content.strip() and not bool(assistant.get("partial")):
+                            return
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(poll_interval)
 
         if not assistant:
             return
-
-        response_id = _clean_id(assistant.get("responseId"))
-        if response_id:
-            self.response_id = response_id
-            self._parent_response_id = response_id
-            yield self._sse(grok=self._grok_metadata())
-
-        if not self.role_sent:
-            yield self._sse(role="assistant", grok=self._grok_metadata())
-            self.role_sent = True
-
-        render_payload = extract_render_payload(assistant)
-        if render_payload:
-            render_payload = await _cache_render_files(
-                render_payload, self.token, self._get_dl()
-            )
-            yield self._sse(rendering=render_payload)
-
-        content = str(assistant.get("message") or "")
-        if content.strip():
-            if self.think_opened:
-                async for chunk in self._close_think_block():
-                    yield chunk
-            self._remember_answer_text(content)
-            yield self._sse(content)
 
     async def process(self, response: AsyncIterable[bytes]) -> AsyncGenerator[str, None]:
         """Process stream response.

@@ -4385,6 +4385,8 @@
             createdAt: Date.now(),
             updatedAt: Date.now(),
             model: "",
+            grokConversationId: "",
+            grokParentResponseId: "",
             unread: false,
             messages: [],
             messagesLoaded: true
@@ -4397,6 +4399,8 @@
           id: session.id,
           title: session.title || "\u65B0\u4F1A\u8BDD",
           model: session.model || "",
+          grokConversationId: session.grokConversationId || "",
+          grokParentResponseId: session.grokParentResponseId || "",
           isDefaultTitle: typeof session.isDefaultTitle === "undefined" ? isDefaultTitleValue(session.title) : session.isDefaultTitle !== false,
           createdAt: Number(session.createdAt || 0) || Date.now(),
           updatedAt: Number(session.updatedAt || 0) || Date.now(),

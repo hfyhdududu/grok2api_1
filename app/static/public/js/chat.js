@@ -998,6 +998,8 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
           createdAt: Date.now(),
           updatedAt: Date.now(),
           model: '',
+          grokConversationId: '',
+          grokParentResponseId: '',
           unread: false,
           messages: [],
           messagesLoaded: true
@@ -1010,6 +1012,8 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
         id: session.id,
         title: session.title || '新会话',
         model: session.model || '',
+        grokConversationId: session.grokConversationId || '',
+        grokParentResponseId: session.grokParentResponseId || '',
         isDefaultTitle: typeof session.isDefaultTitle === 'undefined'
           ? isDefaultTitleValue(session.title)
           : session.isDefaultTitle !== false,
