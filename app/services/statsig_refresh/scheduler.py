@@ -12,18 +12,18 @@ _task: asyncio.Task | None = None
 async def refresh_once() -> bool:
     """执行一次 statsig 刷新流程。"""
     if not is_enabled():
-        logger.debug("statsig_refresh disabled, skip refresh")
+        logger.debug("statsig scheduler refresh skipped: disabled")
         return False
     try:
         from app.services.reverse.browser_bridge import refresh_browser_probe_managed
 
         logger.info("=" * 50)
-        logger.info("开始刷新 x-statsig-id...")
-        await refresh_browser_probe_managed("", True, True)
-        logger.info("x-statsig-id 刷新完成")
+        logger.info("statsig scheduler refresh started")
+        await refresh_browser_probe_managed("", True, True, reason="scheduler")
+        logger.info("statsig scheduler refresh completed")
         return True
     except Exception as exc:
-        logger.error(f"x-statsig-id 刷新失败: {exc}")
+        logger.error(f"statsig scheduler refresh failed: {exc}")
         return False
 
 
@@ -36,7 +36,7 @@ async def _scheduler_loop():
         if is_enabled():
             await refresh_once()
         else:
-            logger.debug("statsig_refresh disabled, skip refresh")
+            logger.debug("statsig scheduler refresh skipped: disabled")
         await asyncio.sleep(get_refresh_interval())
 
 

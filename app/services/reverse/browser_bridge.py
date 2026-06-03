@@ -426,13 +426,13 @@ def get_browser_profile_session(max_age_seconds: int = 120, force_refresh: bool 
     return data
 
 
-def refresh_browser_probe(token: str = "", wait: bool = True) -> Dict[str, Any]:
+def refresh_browser_probe(token: str = "", wait: bool = True, reason: str = "manual") -> Dict[str, Any]:
     sso = _extract_raw_sso(token)
     if not bridge_enabled() or not get_config("cloakbrowser.sync_session", True):
         return {}
     acquired = _PROBE_REFRESH_LOCK.acquire(blocking=wait)
     if not acquired:
-        logger.info("Browser probe refresh skipped: another refresh is already running")
+        logger.info(f"Browser probe refresh skipped: reason={reason}, another refresh is already running")
         return {}
     try:
         probe_data = _probe_request_sync(sso, force=True)
@@ -442,7 +442,8 @@ def refresh_browser_probe(token: str = "", wait: bool = True) -> Dict[str, Any]:
             key = sso or _PROFILE_CACHE_KEY
             _cache_session(key, probe_data)
             logger.info(
-                "Browser probe force refreshed: "
+                f"Browser probe force refreshed: reason={reason}, "
+                f"sso={'yes' if sso else 'no'}, "
                 f"cookie_len={len(str(probe_data.get('cookie_header') or ''))}, "
                 f"ua={'yes' if probe_data.get('user_agent') else 'no'}, "
                 f"statsig={'yes' if probe_data.get('x_statsig_id') else 'no'}, "
@@ -453,11 +454,20 @@ def refresh_browser_probe(token: str = "", wait: bool = True) -> Dict[str, Any]:
         _PROBE_REFRESH_LOCK.release()
 
 
-async def refresh_browser_probe_managed(token: str = "", wait: bool = True, shutdown_after: bool = True) -> Dict[str, Any]:
+async def refresh_browser_probe_managed(
+    token: str = "",
+    wait: bool = True,
+    shutdown_after: bool = True,
+    reason: str = "manual",
+) -> Dict[str, Any]:
     """Start bridge on demand, refresh probe once, then optionally stop it."""
+    logger.info(
+        "Browser probe managed refresh requested: "
+        f"reason={reason}, shutdown_after={'yes' if shutdown_after else 'no'}"
+    )
     await _ensure_bridge_started()
     try:
-        return await asyncio.to_thread(refresh_browser_probe, token, wait)
+        return await asyncio.to_thread(refresh_browser_probe, token, wait, reason)
     finally:
         if shutdown_after:
             await _stop_bridge_after_refresh()

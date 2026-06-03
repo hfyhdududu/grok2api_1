@@ -260,7 +260,8 @@ const HIDDEN_CONFIG_KEYS = new Map([
     'probe_consume_upstream',
     'node_binary',
     'executable_path',
-    'profile_dir'
+    'profile_dir',
+    'manual_statsig_id'
   ])],
 ]);
 
