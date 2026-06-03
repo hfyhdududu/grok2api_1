@@ -458,7 +458,7 @@ class ModelService:
             "grok-imagine-image-edit",
             "grok-imagine-video",
         }:
-            return ["ssoSuper", "ssoHeavy", "ssoBasic"]
+            return ["ssoHeavy", "ssoSuper", "ssoBasic"]
         if model.prefer_best:
             if model.tier == Tier.HEAVY:
                 return ["ssoHeavy", "ssoSuper"]
