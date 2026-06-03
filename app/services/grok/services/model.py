@@ -448,6 +448,17 @@ class ModelService:
         model = cls.get(model_id)
         if not model:
             return ["ssoBasic", "ssoSuper"]
+        if model_id in {
+            "grok-imagine-1.0",
+            "grok-imagine-1.0-edit",
+            "grok-imagine-1.0-video",
+            "grok-imagine-image-lite",
+            "grok-imagine-image",
+            "grok-imagine-image-pro",
+            "grok-imagine-image-edit",
+            "grok-imagine-video",
+        }:
+            return ["ssoSuper", "ssoHeavy", "ssoBasic"]
         if model.prefer_best:
             if model.tier == Tier.HEAVY:
                 return ["ssoHeavy", "ssoSuper"]
