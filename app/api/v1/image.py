@@ -64,7 +64,7 @@ class ImageGenerationRequest(BaseModel):
     """图片生成请求 - OpenAI 兼容"""
 
     prompt: str = Field(..., description="图片描述")
-    model: Optional[str] = Field("grok-imagine-1.0", description="模型名称")
+    model: Optional[str] = Field("grok-imagine-image", description="模型名称")
     n: Optional[int] = Field(1, ge=1, le=10, description="生成数量 (1-10)")
     size: Optional[str] = Field(
         "1024x1024",
@@ -81,7 +81,7 @@ class ImageEditRequest(BaseModel):
     """图片编辑请求 - OpenAI 兼容"""
 
     prompt: str = Field(..., description="编辑描述")
-    model: Optional[str] = Field("grok-imagine-1.0-edit", description="模型名称")
+    model: Optional[str] = Field("grok-imagine-image-edit", description="模型名称")
     image: Optional[Union[str, List[str]]] = Field(None, description="待编辑图片文件")
     n: Optional[int] = Field(1, ge=1, le=10, description="生成数量 (1-10)")
     size: Optional[str] = Field(
@@ -149,16 +149,8 @@ def _validate_common_request(
 
 def validate_generation_request(request: ImageGenerationRequest):
     """验证图片生成请求参数"""
-    if request.model != "grok-imagine-1.0":
-        raise ValidationException(
-            message="The model `grok-imagine-1.0` is required for image generation.",
-            param="model",
-            code="model_not_supported",
-        )
-    # 验证模型 - 通过 is_image 检查
     model_info = ModelService.get(request.model)
     if not model_info or not model_info.is_image:
-        # 获取支持的图片模型列表
         image_models = [m.model_id for m in ModelService.MODELS if m.is_image]
         raise ValidationException(
             message=(
@@ -232,12 +224,6 @@ def _normalize_openai_image_stream_flag(
 
 def validate_edit_request(request: ImageEditRequest, images: List[UploadFile]):
     """验证图片编辑请求参数"""
-    if request.model != "grok-imagine-1.0-edit":
-        raise ValidationException(
-            message=("The model `grok-imagine-1.0-edit` is required for image edits."),
-            param="model",
-            code="model_not_supported",
-        )
     model_info = ModelService.get(request.model)
     if not model_info or not model_info.is_image_edit:
         edit_models = [m.model_id for m in ModelService.MODELS if m.is_image_edit]
@@ -383,7 +369,7 @@ async def edit_image(
     prompt: str = Form(...),
     image: Optional[List[UploadFile]] = File(None),
     image_bracket: Optional[List[UploadFile]] = File(None, alias="image[]"),
-    model: Optional[str] = Form("grok-imagine-1.0-edit"),
+    model: Optional[str] = Form("grok-imagine-image-edit"),
     n: int = Form(1),
     size: str = Form("1024x1024"),
     quality: str = Form("standard"),

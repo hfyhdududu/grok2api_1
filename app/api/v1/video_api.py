@@ -17,7 +17,7 @@ router = APIRouter(tags=["Video"])
 
 class VideoExtendRequest(BaseModel):
     """视频延长请求"""
-    model: str = Field("grok-imagine-1.0-video", description="模型名称")
+    model: str = Field("grok-imagine-video", description="模型名称")
     post_id: str = Field(..., description="原始视频的 post_id")
     prompt: Optional[str] = Field(None, description="延长描述词")
     video_length: Optional[int] = Field(6, description="延长时长 (6/10/15)")
