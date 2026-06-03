@@ -109,6 +109,8 @@ limit_mb = 512
 [chat]
 # Reverse 接口并发上限
 concurrent = 50
+# Chat 上游模式：http / browser / browser_fallback_http
+upstream_mode = "http"
 # 连接超时时间（秒），用于弱网快速失败
 connect_timeout = 12
 # Reverse 接口超时时间（秒）
@@ -117,6 +119,71 @@ timeout = 60
 first_token_timeout = 20
 # 流式空闲超时时间（秒）
 stream_timeout = 60
+
+# ==================== CloakBrowser Chat Bridge ====================
+[cloakbrowser]
+# 是否启用真实浏览器 Chat Bridge
+enabled = false
+# 启动模式：launch（本地启动 CloakBrowser / Chromium）
+mode = "launch"
+# Bridge 监听地址
+bridge_host = "127.0.0.1"
+# Bridge 监听端口
+bridge_port = 9081
+# Bridge 自身请求超时（秒）
+timeout = 120
+# 页面导航超时（毫秒）
+nav_timeout_ms = 45000
+# 页面就绪超时（毫秒）
+ready_timeout_ms = 30000
+# 页面空闲回收时间（毫秒）
+idle_page_ms = 300000
+# 最大复用页面数
+max_pages = 4
+# 是否优先走浏览器链路
+chat_first = true
+# 是否将浏览器会话同步给 HTTP reverse
+sync_session = true
+# 启动时是否预热浏览器会话
+prewarm_on_start = true
+# 预热是否阻塞应用启动完成；session 模式只访问官网，不发送对话
+prewarm_blocking = true
+# 预热模式：session=仅访问官网同步 cookie/UA；probe=发送一次探针捕获完整 chat headers
+prewarm_mode = "session"
+# 预热并发数
+prewarm_concurrency = 1
+# 是否允许不传 sso 时从浏览器 profile 导出已登录会话
+profile_session = true
+# 是否允许复用一份全局 probe headers 给多个 sso
+global_probe = true
+# HTTP reverse 遇到 403 时是否强制刷新 temporary probe 并重试一次
+refresh_probe_on_403 = true
+# HTTP reverse 收到 200/SSE 开始时，立即后台刷新 temporary probe 给下一轮使用
+refresh_probe_on_sse_start = true
+# HTTP reverse 发起请求前，如后台 probe 正在刷新，是否短暂等待其完成
+wait_probe_before_request = true
+# 请求前等待后台 probe 刷新的最长时间（秒）
+wait_probe_timeout = 8
+# 每次 HTTP reverse 成功完成流式对话后，后台刷新 temporary probe 给下一次使用
+refresh_probe_after_success = true
+# 全局 probe 持久化文件
+probe_cache_file = "data/cloakbrowser-probe.json"
+# 全局 probe 缓存 TTL（秒），0 表示不过期
+probe_cache_ttl_seconds = 0
+# probe 入口；临时语义在请求层强制 temporary=true，避免 UI 停在不可访问的私人链接
+private_chat_url = "https://grok.com/"
+# 临时会话 probe 文本
+probe_message = "你好"
+# 是否让 probe 请求真正发送到 Grok；false 表示只捕获真实浏览器生成的 headers，不消耗 statsig
+probe_consume_upstream = false
+# Node 可执行文件
+node_binary = "node"
+# CloakBrowser/Chromium 可执行文件路径，留空则由 Playwright 默认解析
+executable_path = ""
+# 浏览器用户数据目录
+profile_dir = "data/cloakbrowser-profile"
+# 是否无头运行
+headless = false
 
 # ==================== 图像配置 ====================
 [image]

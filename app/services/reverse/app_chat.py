@@ -4,6 +4,7 @@ Reverse interface: app chat conversations.
 
 import orjson
 import inspect
+import asyncio
 from typing import Any, Dict, List, Optional
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.errors import RequestsError
@@ -14,6 +15,11 @@ from app.core.exceptions import UpstreamException
 from app.services.token.service import TokenService
 from app.services.grok.services.model import ModelService
 from app.services.reverse.rate_limits import MODE_NAME_BY_KEY, RateLimitsReverse
+from app.services.reverse.browser_bridge import (
+    refresh_browser_probe,
+    wait_for_browser_probe_refresh,
+    warmup_browser_session,
+)
 from app.services.reverse.utils.headers import build_headers
 from app.services.reverse.utils.retry import retry_on_status
 
@@ -98,6 +104,18 @@ async def _diagnose_chat_429(
 
 class AppChatReverse:
     """/rest/app-chat/conversations/new reverse interface."""
+
+    @staticmethod
+    async def _refresh_probe_background(token: str, reason: str) -> None:
+        """Refresh the short-lived browser probe without blocking the active stream."""
+        if not get_config("cloakbrowser.refresh_probe_after_success", True):
+            return
+        try:
+            logger.info(f"Browser probe background refresh started: reason={reason}")
+            await asyncio.to_thread(refresh_browser_probe, token, False)
+            logger.info(f"Browser probe background refresh completed: reason={reason}")
+        except Exception as exc:
+            logger.warning(f"Browser probe background refresh failed: reason={reason}, error={exc}")
 
     @staticmethod
     def _resolve_custom_personality() -> Optional[str]:
@@ -259,17 +277,35 @@ class AppChatReverse:
             Any: The response from the request.
         """
         try:
+            if get_config("cloakbrowser.sync_session", True):
+                try:
+                    if get_config("cloakbrowser.wait_probe_before_request", True):
+                        timeout = float(get_config("cloakbrowser.wait_probe_timeout", 8) or 8)
+                        await asyncio.to_thread(wait_for_browser_probe_refresh, timeout)
+                    session_data = await warmup_browser_session(token)
+                    logger.info(
+                        "Browser session warmup complete: "
+                        f"cookie_len={len(str((session_data or {}).get('cookie_header') or ''))}, "
+                        f"ua={'yes' if (session_data or {}).get('user_agent') else 'no'}, "
+                        f"statsig={'yes' if (session_data or {}).get('x_statsig_id') else 'no'}"
+                    )
+                except Exception as sync_error:
+                    logger.warning(f"Browser session warmup failed before chat request: {sync_error}")
+
             # Get proxies
             base_proxy = get_config("proxy.base_proxy_url")
             proxies = {"http": base_proxy, "https": base_proxy} if base_proxy else None
 
+            def _build_chat_headers() -> Dict[str, str]:
+                return build_headers(
+                    cookie_token=token,
+                    content_type="application/json",
+                    origin="https://grok.com",
+                    referer="https://grok.com/",
+                )
+
             # Build headers
-            headers = build_headers(
-                cookie_token=token,
-                content_type="application/json",
-                origin="https://grok.com",
-                referer="https://grok.com/",
-            )
+            headers = _build_chat_headers()
 
             # Build payload
             payload = AppChatReverse.build_payload(
@@ -314,13 +350,13 @@ class AppChatReverse:
             )
             # curl_cffi 支持 (connect_timeout, read_timeout)；流读取阶段仍由上层 idle timeout 控制。
             timeout = (connect_timeout, base_timeout)
-            browser = get_config("proxy.browser")
+            browser = get_config("proxy.browser") or "chrome124"
 
-            async def _do_request():
+            async def _post_once(request_headers: Dict[str, str]):
                 try:
                     response = await session.post(
                         url,
-                        headers=headers,
+                        headers=request_headers,
                         data=orjson.dumps(payload),
                         timeout=timeout,
                         stream=True,
@@ -334,6 +370,37 @@ class AppChatReverse:
                             details={"status": 599, "error": str(e)},
                         ) from e
                     raise
+
+                return response
+
+            async def _do_request():
+                nonlocal headers
+                response = await _post_once(headers)
+
+                if (
+                    response.status_code == 403
+                    and get_config("cloakbrowser.refresh_probe_on_403", True)
+                ):
+                    try:
+                        content = ""
+                        try:
+                            content = await response.text()
+                        except Exception:
+                            pass
+                        logger.warning(
+                            "AppChat 403 with browser probe headers, force refreshing probe and retrying once"
+                        )
+                        await asyncio.to_thread(refresh_browser_probe, token)
+                        headers = _build_chat_headers()
+                        response = await _post_once(headers)
+                        logger.info(
+                            "AppChat retry after browser probe refresh completed: "
+                            f"status={response.status_code}"
+                        )
+                    except UpstreamException:
+                        raise
+                    except Exception as refresh_error:
+                        logger.warning(f"Browser probe refresh on 403 failed: {refresh_error}")
 
                 if response.status_code != 200:
 
@@ -375,6 +442,11 @@ class AppChatReverse:
                         details=details,
                     )
 
+                if get_config("cloakbrowser.refresh_probe_on_sse_start", True):
+                    asyncio.create_task(
+                        AppChatReverse._refresh_probe_background(token, "app_chat_sse_start")
+                    )
+
                 return response
 
             def extract_status(e: Exception) -> Optional[int]:
@@ -396,6 +468,7 @@ class AppChatReverse:
 
             # Stream response
             async def stream_response():
+                stream_completed = False
                 try:
                     async for line in response.aiter_lines():
                         if line is None:
@@ -408,6 +481,7 @@ class AppChatReverse:
                             item = item.strip()
                             if item:
                                 yield item
+                    stream_completed = True
                 finally:
                     try:
                         close_fn = getattr(response, "aclose", None)
@@ -423,6 +497,14 @@ class AppChatReverse:
                                     await result
                     except Exception:
                         pass
+                    if (
+                        stream_completed
+                        and get_config("cloakbrowser.refresh_probe_after_success", True)
+                        and not get_config("cloakbrowser.refresh_probe_on_sse_start", True)
+                    ):
+                        asyncio.create_task(
+                            AppChatReverse._refresh_probe_background(token, "app_chat_success")
+                        )
 
             return stream_response()
 

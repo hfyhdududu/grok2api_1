@@ -25,6 +25,11 @@ from app.services.grok.utils.upload import UploadService
 from app.services.grok.utils import process as proc_base
 from app.services.grok.utils.retry import pick_token, rate_limited
 from app.services.reverse.app_chat import AppChatReverse
+from app.services.reverse.browser_bridge import (
+    bridge_chat_first,
+    bridge_enabled,
+    request_browser_bridge,
+)
 from app.services.grok.utils.stream import wrap_stream_with_usage
 from app.services.token import get_token_manager, EffortType
 from app.services.grok.utils.tool_call import (
@@ -45,6 +50,10 @@ _QUOTA_MODE_LABELS = {
     "heavy": "Heavy",
     "grok_4_3": "4.3 Beta",
 }
+
+
+def _chat_upstream_mode() -> str:
+    return str(get_config("chat.upstream_mode", "http") or "http").strip().lower()
 
 
 def _describe_upstream_chat_error(exc: Exception) -> str:
@@ -854,9 +863,64 @@ class GrokChatService:
             f"attachments={len(file_attachments or [])}"
         )
 
-        browser = get_config("proxy.browser")
+        browser = get_config("proxy.browser") or "chrome124"
+        upstream_mode = _chat_upstream_mode()
+
+        browser_payload = AppChatReverse.build_payload(
+            message=message,
+            model=model,
+            mode=mode,
+            file_attachments=file_attachments,
+            tool_overrides=tool_overrides,
+            model_config_override=model_config_override,
+            image_generation_count=image_generation_count,
+            conversation_id=conversation_id,
+            parent_response_id=parent_response_id,
+        )
+
+        async def _browser_stream():
+            async with _get_chat_semaphore():
+                stream_response = request_browser_bridge(
+                    token,
+                    browser_payload,
+                    conversation_id=conversation_id or "",
+                )
+                logger.info(
+                    "Chat connected via browser bridge: "
+                    f"requested_model={requested_model or model}, "
+                    f"upstream_model={model}, mode={mode}, stream={stream}"
+                )
+                async for line in stream_response:
+                    yield line
 
         async def _stream():
+            should_try_browser = (
+                bridge_enabled()
+                and bridge_chat_first()
+                and upstream_mode in {"browser", "browser_fallback_http"}
+            )
+
+            if should_try_browser:
+                try:
+                    async for line in _browser_stream():
+                        yield line
+                    return
+                except UpstreamException as exc:
+                    if upstream_mode == "browser":
+                        raise
+                    logger.warning(
+                        "Browser bridge failed, falling back to HTTP upstream: "
+                        f"status={getattr(exc, 'status_code', None) or (exc.details or {}).get('status')}, "
+                        f"details={exc.details}"
+                    )
+
+            if upstream_mode == "browser" and not bridge_enabled():
+                raise UpstreamException(
+                    message="Browser bridge is disabled",
+                    details={"status": 503, "bridge_code": "bridge_disabled"},
+                    status_code=503,
+                )
+
             session = AsyncSession(impersonate=browser)
             try:
                 async with _get_chat_semaphore():
@@ -875,14 +939,12 @@ class GrokChatService:
                         parent_response_id=parent_response_id,
                     )
                     logger.info(
-                        "Chat connected: "
+                        "Chat connected via HTTP reverse: "
                         f"requested_model={requested_model or model}, "
                         f"upstream_model={model}, mode={mode}, stream={stream}"
                     )
                     async for line in stream_response:
                         yield line
-            except Exception:
-                raise
             finally:
                 try:
                     await session.close()

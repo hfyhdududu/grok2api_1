@@ -98,6 +98,19 @@ async def lifespan(app: FastAPI):
     from app.services.cf_refresh import start as cf_refresh_start
     cf_refresh_start()
 
+    from app.services.browser_bridge import start as browser_bridge_start
+    await browser_bridge_start()
+
+    if get_config("cloakbrowser.prewarm_on_start", True):
+        from app.services.reverse.browser_bridge import prewarm_browser_sessions
+
+        if get_config("cloakbrowser.prewarm_blocking", True):
+            await prewarm_browser_sessions()
+        else:
+            import asyncio
+
+            asyncio.create_task(prewarm_browser_sessions())
+
     logger.info("Application startup complete.")
     yield
 
@@ -106,6 +119,9 @@ async def lifespan(app: FastAPI):
 
     from app.services.cf_refresh import stop as cf_refresh_stop
     cf_refresh_stop()
+
+    from app.services.browser_bridge import stop as browser_bridge_stop
+    await browser_bridge_stop()
 
     from app.core.storage import StorageFactory
 

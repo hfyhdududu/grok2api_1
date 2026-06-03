@@ -8,6 +8,7 @@ import string
 
 from app.core.logger import logger
 from app.core.config import get_config
+from app.services.reverse.browser_bridge import get_browser_session
 
 
 class StatsigGenerator:
@@ -24,13 +25,20 @@ class StatsigGenerator:
         return "".join(random.choices(chars, k=length))
 
     @staticmethod
-    def gen_id() -> str:
+    def gen_id(token: str | None = None) -> str:
         """
         Generate Statsig ID.
 
         Returns:
             Base64 encoded ID.
         """
+        if token:
+            session = get_browser_session(token)
+            session_statsig = str(session.get("x_statsig_id") or "").strip()
+            if session_statsig:
+                logger.debug("Using browser session Statsig ID")
+                return session_statsig
+
         dynamic = get_config("app.dynamic_statsig")
 
         # Dynamic Statsig ID
