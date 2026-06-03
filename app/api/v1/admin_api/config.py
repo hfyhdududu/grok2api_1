@@ -216,7 +216,7 @@ async def get_model_routing_meta():
     """获取模型池路由界面所需的模型与池元数据。"""
     token_mgr = await get_token_manager()
     pool_names = set(token_mgr.pools.keys())
-    pool_names.update({"ssoBasic", "ssoSuper"})
+    pool_names.update({"ssoBasic", "ssoSuper", "ssoHeavy"})
 
     models = [
         {
