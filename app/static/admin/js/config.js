@@ -3,6 +3,15 @@ let currentConfig = {};
 let modelRoutingMeta = { models: [], pools: ['ssoBasic', 'ssoSuper'] };
 let modelRoutingAssignments = {};
 let modelRoutingDragId = '';
+let currentStatsigInfo = {
+  enabled: false,
+  x_statsig_id: '',
+  manual_statsig_id: '',
+  effective_statsig_id: '',
+  captured_at: '',
+  user_agent: '',
+  header_keys: []
+};
 const byId = (id) => document.getElementById(id);
 const NUMERIC_FIELDS = new Set([
   'timeout',
@@ -32,7 +41,15 @@ const NUMERIC_FIELDS = new Set([
   'final_min_bytes',
   'medium_min_bytes',
   'concurrent',
-  'batch_size'
+  'batch_size',
+  'bridge_port',
+  'nav_timeout_ms',
+  'ready_timeout_ms',
+  'idle_page_ms',
+  'max_pages',
+  'prewarm_concurrency',
+  'wait_probe_timeout',
+  'probe_cache_ttl_seconds'
 ]);
 
 const LOCALE_MAP = {
@@ -176,13 +193,36 @@ const LOCALE_MAP = {
     "concurrent": { title: "并发上限", desc: "批量刷新用量时的并发请求上限。推荐 10。" },
     "batch_size": { title: "批次大小", desc: "批量刷新用量的单批处理数量。推荐 50。" },
     "timeout": { title: "请求超时", desc: "用量查询接口的超时时间（秒）。推荐 60。" }
+  },
+
+
+  "cloakbrowser": {
+    "label": "CloakBrowser",
+    "enabled": { title: "启用浏览器桥", desc: "启用后通过真实浏览器建立 Grok 会话，并为 HTTP reverse 提供可复用的真实请求头。" },
+    "sync_session": { title: "同步真实会话", desc: "启用后将浏览器抓到的 Cookie、UA 和请求头同步给 HTTP reverse。" },
+    "prewarm_on_start": { title: "启动预热", desc: "服务启动时自动准备浏览器会话与 probe。" },
+    "prewarm_blocking": { title: "阻塞预热", desc: "启用后应用启动完成前会等待浏览器预热结束。" },
+    "prewarm_mode": { title: "预热模式", desc: "session 只同步会话，probe 还会抓一份可复用的真实 chat headers。" },
+    "profile_session": { title: "复用浏览器 Profile", desc: "允许直接使用浏览器 profile 中已登录的 Grok 会话。" },
+    "global_probe": { title: "全局 Probe", desc: "启用后同一份 x-statsig-id 和请求头可被多个 SSO 复用。" },
+    "refresh_probe_on_403": { title: "403 时刷新 Probe", desc: "当 chat 请求返回 403 时，强制重新抓取一次真实浏览器 probe 并重试。" },
+    "refresh_probe_on_sse_start": { title: "SSE 开始后自动刷新", desc: "收到流式响应开头时就后台刷新下一份 probe。建议关闭，优先长期复用当前有效 statsig。" },
+    "wait_probe_before_request": { title: "请求前等待 Probe", desc: "若后台正在刷新 probe，请求发起前短暂等待其完成。" },
+    "wait_probe_timeout": { title: "等待 Probe 超时", desc: "请求前等待后台 probe 完成的最长时间（秒）。" },
+    "refresh_probe_after_success": { title: "成功后自动刷新", desc: "每次 chat 成功结束后刷新下一份 probe。建议关闭，避免无必要轮换 x-statsig-id。" },
+    "private_chat_url": { title: "Probe 入口 URL", desc: "浏览器抓取 probe 时优先进入的页面地址。" },
+    "probe_message": { title: "Probe 文本", desc: "触发真实浏览器 app-chat 请求时发送的探针文本。" },
+    "manual_statsig_id": { title: "手动 Statsig", desc: "可手动填入一个长期有效的 x-statsig-id。填入后优先于浏览器自动捕获值。" },
+    "session_cookies_json": { title: "会话 Cookies JSON", desc: "可粘贴完整浏览器 Cookie 数组。Docker 或独立浏览器环境推荐使用，用于注入已登录 Grok 会话。" },
+    "headless": { title: "无头模式", desc: "关闭后可看到真实浏览器窗口，便于手动过验证和观察页面状态。" }
   }
 };
 
 // 配置部分说明（可选）
 const SECTION_DESCRIPTIONS = {
   "proxy": "配置不正确将导致 403 错误。服务首次请求 Grok 时的 IP 必须与获取 CF Clearance 时的 IP 一致，后续服务器请求 IP 变化不会导致 403。",
-  "model_routing": "这里可以手动指定每个模型优先走哪个 Token 池。未配置的模型仍会按系统默认路由。"
+  "model_routing": "这里可以手动指定每个模型优先走哪个 Token 池。未配置的模型仍会按系统默认路由。",
+  "cloakbrowser": "这里保留的是和抗 403 修复直接相关的核心项。通常推荐：开启全局 Probe，关闭成功后自动刷新，只有 403 或你手动点击时再更新 x-statsig-id。"
 };
 
 // CF 自动刷新联动禁用字段（全部在 proxy section 内）
@@ -193,6 +233,24 @@ const SECTION_ORDER = new Map(Object.keys(LOCALE_MAP).map((key, index) => [key, 
 const HIDDEN_CONFIG_KEYS = new Map([
   ['app', new Set(['reuse_grok_conversation'])],
   ['chat', new Set(['capture_enabled', 'capture_file'])],
+  ['cloakbrowser', new Set([
+    'mode',
+    'bridge_host',
+    'bridge_port',
+    'timeout',
+    'nav_timeout_ms',
+    'ready_timeout_ms',
+    'idle_page_ms',
+    'max_pages',
+    'chat_first',
+    'prewarm_concurrency',
+    'probe_cache_file',
+    'probe_cache_ttl_seconds',
+    'probe_consume_upstream',
+    'node_binary',
+    'executable_path',
+    'profile_dir'
+  ])],
 ]);
 
 function getText(section, key) {
@@ -335,7 +393,21 @@ async function init() {
   apiKey = await ensureAdminKey();
   if (apiKey === null) return;
   await loadModelRoutingMeta();
+  await loadStatsigStatus();
   loadData();
+}
+
+async function loadStatsigStatus() {
+  try {
+    const res = await fetch('/v1/admin/config/statsig', {
+      headers: buildAuthHeaders(apiKey)
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    currentStatsigInfo = data && data.data ? data.data : currentStatsigInfo;
+  } catch (e) {
+    console.warn('x-statsig-id 状态加载失败', e);
+  }
 }
 
 async function loadModelRoutingMeta() {
@@ -379,6 +451,7 @@ function renderConfig(data) {
 
   const fragment = document.createDocumentFragment();
   const sections = sortByOrder(Object.keys(data), SECTION_ORDER);
+  let cloakbrowserCardInserted = false;
 
   sections.forEach(section => {
     const items = data[section];
@@ -460,15 +533,40 @@ function renderConfig(data) {
       }
       if (grid.children.length > 0) {
         fragment.appendChild(card);
+        if (section === 'cloakbrowser') {
+          fragment.appendChild(buildStatsigSectionCard());
+          cloakbrowserCardInserted = true;
+        }
       }
     }
   });
+
+  if (!cloakbrowserCardInserted) {
+    fragment.appendChild(buildStatsigSectionCard());
+  }
 
   container.appendChild(fragment);
 
   // 初始化 CF 自动刷新联动状态
   const cfEnabled = data.proxy && data.proxy.enabled;
   applyCfRefreshState(cfEnabled);
+}
+
+function buildStatsigSectionCard() {
+  const card = document.createElement('div');
+  card.className = 'config-section';
+
+  const header = document.createElement('div');
+  header.innerHTML = `<div class="config-section-title">Statsig 修复</div>`;
+
+  const descP = document.createElement('p');
+  descP.className = 'text-[var(--accents-4)] text-sm mt-1 mb-4';
+  descP.textContent = '这里集中管理 x-statsig-id 的显示、手动填写与手动刷新。建议先长期复用同一份有效值，只有 403 或你确认失效时再刷新。';
+  header.appendChild(descP);
+
+  card.appendChild(header);
+  card.appendChild(buildStatsigPanel());
+  return card;
 }
 
 async function manualRefreshCfClearance() {
@@ -499,6 +597,208 @@ async function manualRefreshCfClearance() {
     btn.disabled = false;
     btn.innerHTML = originalHtml;
   }
+}
+
+function buildStatsigPanel() {
+  const wrap = document.createElement('div');
+  wrap.className = 'mt-5 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 space-y-3';
+
+  const top = document.createElement('div');
+  top.className = 'flex flex-col gap-3 md:flex-row md:items-center md:justify-between';
+
+  const titleBox = document.createElement('div');
+  const title = document.createElement('div');
+  title.className = 'text-sm font-medium';
+  title.textContent = 'x-statsig-id';
+  const desc = document.createElement('div');
+  desc.className = 'text-xs text-[var(--accents-4)] mt-1';
+  desc.textContent = currentStatsigInfo.enabled
+    ? '这里显示当前生效的 x-statsig-id。你可以直接手填固定值，也可以让真实浏览器自动捕获并长期复用。'
+    : '当前未启用 CloakBrowser bridge，无法捕获真实浏览器 x-statsig-id。';
+  titleBox.appendChild(title);
+  titleBox.appendChild(desc);
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = 'statsig-refresh-btn';
+  btn.className = 'geist-button-outline gap-2 w-full md:w-auto justify-center';
+  btn.disabled = !currentStatsigInfo.enabled;
+  btn.innerHTML = `
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M21 2v6h-6"></path>
+      <path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path>
+      <path d="M3 22v-6h6"></path>
+      <path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path>
+    </svg>
+    手动刷新 x-statsig-id
+  `;
+  btn.addEventListener('click', manualRefreshStatsig);
+
+  top.appendChild(titleBox);
+  top.appendChild(btn);
+
+  const effectiveLabel = document.createElement('div');
+  effectiveLabel.className = 'text-xs font-medium text-[var(--accents-5)]';
+  effectiveLabel.textContent = '当前生效值';
+
+  const input = document.createElement('textarea');
+  input.id = 'statsig-value';
+  input.className = 'geist-input font-mono text-xs min-h-[90px]';
+  input.readOnly = true;
+  input.value = currentStatsigInfo.effective_statsig_id || '';
+  input.placeholder = currentStatsigInfo.enabled ? '尚未捕获到 x-statsig-id' : '未启用 CloakBrowser bridge';
+
+  const manualLabel = document.createElement('div');
+  manualLabel.className = 'text-xs font-medium text-[var(--accents-5)]';
+  manualLabel.textContent = '手动填写';
+
+  const manualInput = document.createElement('textarea');
+  manualInput.id = 'statsig-manual-value';
+  manualInput.className = 'geist-input font-mono text-xs min-h-[90px]';
+  manualInput.readOnly = false;
+  manualInput.value = currentStatsigInfo.manual_statsig_id || '';
+  manualInput.placeholder = '留空表示使用浏览器自动捕获值；填入后将优先生效';
+
+  const actionRow = document.createElement('div');
+  actionRow.className = 'flex flex-col gap-2 md:flex-row';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.id = 'statsig-save-btn';
+  saveBtn.className = 'geist-button gap-2 w-full md:w-auto justify-center';
+  saveBtn.textContent = '保存手动 x-statsig-id';
+  saveBtn.addEventListener('click', saveManualStatsig);
+
+  const clearBtn = document.createElement('button');
+  clearBtn.type = 'button';
+  clearBtn.id = 'statsig-clear-btn';
+  clearBtn.className = 'geist-button-outline gap-2 w-full md:w-auto justify-center';
+  clearBtn.textContent = '清空手动值';
+  clearBtn.addEventListener('click', clearManualStatsig);
+
+  actionRow.appendChild(saveBtn);
+  actionRow.appendChild(clearBtn);
+
+  const meta = document.createElement('div');
+  meta.className = 'text-xs text-[var(--accents-4)] flex flex-col gap-1';
+  const capturedAt = formatLocalDateTime(currentStatsigInfo.captured_at);
+  const headerCount = Array.isArray(currentStatsigInfo.header_keys) ? currentStatsigInfo.header_keys.length : 0;
+  meta.innerHTML = `
+    <div>来源优先级：手动填写 > 浏览器捕获 > 程序动态生成</div>
+    <div>最近捕获时间：${escapeHtml(capturedAt)}</div>
+    <div>捕获 Header 数量：${headerCount}</div>
+  `;
+
+  wrap.appendChild(top);
+  wrap.appendChild(effectiveLabel);
+  wrap.appendChild(input);
+  wrap.appendChild(manualLabel);
+  wrap.appendChild(manualInput);
+  wrap.appendChild(actionRow);
+  wrap.appendChild(meta);
+  return wrap;
+}
+
+async function manualRefreshStatsig() {
+  const btn = byId('statsig-refresh-btn');
+  const input = byId('statsig-value');
+  if (!btn) return;
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `
+    <svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M21 12a9 9 0 1 1-6.219-8.56"></path>
+    </svg>
+    刷新中...
+  `;
+  try {
+    const res = await fetch('/v1/admin/config/statsig-refresh', {
+      method: 'POST',
+      headers: buildAuthHeaders(apiKey)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+    }
+    currentStatsigInfo = data && data.data ? data.data : currentStatsigInfo;
+    if (input) {
+      input.value = currentStatsigInfo.effective_statsig_id || '';
+    }
+    showToast(data.message || 'x-statsig-id 已刷新', 'success');
+    await loadData();
+  } catch (e) {
+    showToast(`刷新失败: ${e.message || e}`, 'error');
+  } finally {
+    btn.disabled = !currentStatsigInfo.enabled;
+    btn.innerHTML = originalHtml;
+  }
+}
+
+async function saveManualStatsig() {
+  const btn = byId('statsig-save-btn');
+  const input = byId('statsig-manual-value');
+  if (!btn || !input) return;
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '保存中...';
+  try {
+    const res = await fetch('/v1/admin/config/statsig-manual', {
+      method: 'POST',
+      headers: {
+        ...buildAuthHeaders(apiKey),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        manual_statsig_id: input.value || ''
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+    }
+    currentStatsigInfo = data && data.data ? data.data : currentStatsigInfo;
+    showToast(data.message || '手动 x-statsig-id 已更新', 'success');
+    await loadData();
+  } catch (e) {
+    showToast(`保存失败: ${e.message || e}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+async function clearManualStatsig() {
+  const input = byId('statsig-manual-value');
+  if (input) {
+    input.value = '';
+  }
+  await saveManualStatsig();
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatLocalDateTime(value) {
+  if (!value) return '未捕获';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  return date.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
 }
 
 function formatBytes(bytes) {
@@ -790,6 +1090,17 @@ function buildFieldCard(section, key, val) {
     built = buildSelectInput(section, key, val, [
       { val: 'html', text: 'HTML' },
       { val: 'url', text: 'URL' }
+    ]);
+  }
+  else if (section === 'cloakbrowser' && key === 'mode') {
+    built = buildSelectInput(section, key, val, [
+      { val: 'launch', text: 'launch' }
+    ]);
+  }
+  else if (section === 'cloakbrowser' && key === 'prewarm_mode') {
+    built = buildSelectInput(section, key, val, [
+      { val: 'session', text: 'session' },
+      { val: 'probe', text: 'probe' }
     ]);
   }
   else if (section === 'imagine_fast' && key === 'size') {

@@ -25,7 +25,47 @@ const PROFILE_SLOT_KEY = "__profile__";
 const HOME_URL = "https://grok.com/";
 const PRIVATE_CHAT_URL = process.env.GROK_CLOAK_PRIVATE_CHAT_URL || HOME_URL;
 const PROBE_MESSAGE = process.env.GROK_CLOAK_PROBE_MESSAGE || "你好";
+const SESSION_COOKIES_JSON = (process.env.GROK_CLOAK_SESSION_COOKIES_JSON || "").trim();
 const PROBE_CONSUME_UPSTREAM = String(process.env.GROK_CLOAK_PROBE_CONSUME_UPSTREAM || "false").toLowerCase() === "true";
+
+function parseInjectedCookies() {
+  if (!SESSION_COOKIES_JSON) return [];
+  try {
+    const parsed = JSON.parse(SESSION_COOKIES_JSON);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const name = String(item.name || "").trim();
+        const value = String(item.value || "");
+        if (!name) return null;
+        const domain = String(item.domain || ".grok.com").trim() || ".grok.com";
+        const path = String(item.path || "/").trim() || "/";
+        const sameSiteRaw = String(item.sameSite || "").trim().toLowerCase();
+        let sameSite = undefined;
+        if (sameSiteRaw === "lax") sameSite = "Lax";
+        else if (sameSiteRaw === "strict") sameSite = "Strict";
+        else if (sameSiteRaw === "none" || sameSiteRaw === "no_restriction") sameSite = "None";
+        const cookie = {
+          name,
+          value,
+          domain,
+          path,
+          httpOnly: Boolean(item.httpOnly),
+          secure: item.secure !== false,
+        };
+        if (sameSite) cookie.sameSite = sameSite;
+        if (typeof item.expirationDate === "number" && Number.isFinite(item.expirationDate)) {
+          cookie.expires = item.expirationDate;
+        }
+        return cookie;
+      })
+      .filter(Boolean);
+  } catch (error) {
+    log(`session cookies json parse failed: ${error.message}`);
+    return [];
+  }
+}
 
 function buildTemporaryProbePayload(basePayload = {}, pageInfo = {}) {
   const viewport = pageInfo.viewport || {};
@@ -227,17 +267,23 @@ async function ensureBrowser() {
 }
 
 async function createContextWithCookies(playwrightBrowser, sso) {
+  const injectedCookies = parseInjectedCookies();
+  const authCookies = [];
+  if (sso) {
+    authCookies.push(
+      { name: "sso", value: sso, domain: ".grok.com", path: "/" },
+      { name: "sso-rw", value: sso, domain: ".grok.com", path: "/" }
+    );
+  }
+  const cookiesToAdd = injectedCookies.length ? injectedCookies : authCookies;
   const isPersistentContext =
     typeof playwrightBrowser.newPage === "function" &&
     typeof playwrightBrowser.cookies === "function" &&
     typeof playwrightBrowser.newContext !== "function";
 
   if (isPersistentContext) {
-    if (sso) {
-      await playwrightBrowser.addCookies([
-        { name: "sso", value: sso, domain: ".grok.com", path: "/" },
-        { name: "sso-rw", value: sso, domain: ".grok.com", path: "/" },
-      ]);
+    if (cookiesToAdd.length) {
+      await playwrightBrowser.addCookies(cookiesToAdd);
     }
     return { context: playwrightBrowser, page: await playwrightBrowser.newPage() };
   }
@@ -245,11 +291,8 @@ async function createContextWithCookies(playwrightBrowser, sso) {
   const context = await playwrightBrowser.newContext({
     viewport: { width: 1600, height: 1000 },
   });
-  if (sso) {
-    await context.addCookies([
-      { name: "sso", value: sso, domain: ".grok.com", path: "/" },
-      { name: "sso-rw", value: sso, domain: ".grok.com", path: "/" },
-    ]);
+  if (cookiesToAdd.length) {
+    await context.addCookies(cookiesToAdd);
   }
   return { context, page: await context.newPage() };
 }
@@ -270,7 +313,16 @@ async function prepareSlot(slot) {
   const hasSession = cookies.some(
     (item) => item.name === "x-userid" || item.name === "sso" || item.name === "sso-rw"
   );
+  let hasUsableChat = false;
   if (!hasSession) {
+    hasUsableChat = await page
+      .locator("textarea, [contenteditable='true']")
+      .first()
+      .isVisible({ timeout: 1500 })
+      .catch(() => false);
+  }
+  if (!hasSession && !hasUsableChat) {
+    await captureDiagnostics(page, "prepare-slot-no-session");
     throw new BridgeError("sso_unavailable", "SSO cookie did not establish a Grok session", 401);
   }
 

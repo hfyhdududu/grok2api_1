@@ -16,7 +16,7 @@ from app.services.token.service import TokenService
 from app.services.grok.services.model import ModelService
 from app.services.reverse.rate_limits import MODE_NAME_BY_KEY, RateLimitsReverse
 from app.services.reverse.browser_bridge import (
-    refresh_browser_probe,
+    refresh_browser_probe_managed,
     wait_for_browser_probe_refresh,
     warmup_browser_session,
 )
@@ -108,11 +108,13 @@ class AppChatReverse:
     @staticmethod
     async def _refresh_probe_background(token: str, reason: str) -> None:
         """Refresh the short-lived browser probe without blocking the active stream."""
-        if not get_config("cloakbrowser.refresh_probe_after_success", True):
+        if reason == "app_chat_sse_start" and not get_config("cloakbrowser.refresh_probe_on_sse_start", True):
+            return
+        if reason == "app_chat_success" and not get_config("cloakbrowser.refresh_probe_after_success", True):
             return
         try:
             logger.info(f"Browser probe background refresh started: reason={reason}")
-            await asyncio.to_thread(refresh_browser_probe, token, False)
+            await refresh_browser_probe_managed(token, False, True)
             logger.info(f"Browser probe background refresh completed: reason={reason}")
         except Exception as exc:
             logger.warning(f"Browser probe background refresh failed: reason={reason}, error={exc}")
@@ -390,7 +392,7 @@ class AppChatReverse:
                         logger.warning(
                             "AppChat 403 with browser probe headers, force refreshing probe and retrying once"
                         )
-                        await asyncio.to_thread(refresh_browser_probe, token)
+                        await refresh_browser_probe_managed(token, True, True)
                         headers = _build_chat_headers()
                         response = await _post_once(headers)
                         logger.info(

@@ -17,6 +17,9 @@ from urllib.parse import quote
 from app.core.config import get_config
 from app.core.exceptions import UpstreamException
 from app.core.logger import logger
+from app.services.browser_bridge import healthcheck as bridge_healthcheck
+from app.services.browser_bridge import start as start_bridge
+from app.services.browser_bridge import stop as stop_bridge
 
 _SESSION_CACHE: dict[str, dict[str, Any]] = {}
 _PROFILE_CACHE_KEY = "__profile__"
@@ -78,6 +81,43 @@ def _probe_cache_ttl_seconds() -> float:
 
 def _global_probe_enabled() -> bool:
     return bool(get_config("cloakbrowser.global_probe", True))
+
+
+def _manual_statsig_configured() -> bool:
+    return bool(str(get_config("cloakbrowser.manual_statsig_id", "") or "").strip())
+
+
+def _has_reusable_probe_source() -> bool:
+    if _manual_statsig_configured():
+        return True
+    probe = _load_global_probe()
+    return bool(probe and probe.get("x_statsig_id") and probe.get("request_headers"))
+
+
+def _cached_probe_session_payload() -> Dict[str, Any]:
+    probe = _load_global_probe()
+    if not probe:
+        return {}
+    return {
+        "request_headers": probe.get("request_headers") or {},
+        "x_statsig_id": probe.get("x_statsig_id") or "",
+        "user_agent": probe.get("user_agent") or "",
+        "captured_at": probe.get("captured_at") or "",
+        "probe_source": "global",
+    }
+
+
+async def _ensure_bridge_started() -> None:
+    if await bridge_healthcheck():
+        return
+    await start_bridge()
+
+
+async def _stop_bridge_after_refresh() -> None:
+    try:
+        await stop_bridge()
+    except Exception as exc:
+        logger.warning(f"Stop browser bridge after refresh failed: {exc}")
 
 
 def _request_sync(sso: str, payload: Dict[str, Any], conversation_id: str = "") -> str:
@@ -254,6 +294,11 @@ def _load_global_probe() -> Dict[str, Any]:
     return probe
 
 
+def get_cached_global_probe() -> Dict[str, Any]:
+    """Return persisted or in-memory global probe without contacting the browser bridge."""
+    return _load_global_probe()
+
+
 def _save_global_probe(data: Dict[str, Any]) -> Dict[str, Any]:
     if not _global_probe_enabled():
         return {}
@@ -331,6 +376,11 @@ def get_browser_session(token: str, max_age_seconds: int = 120, force_refresh: b
     now = time.time()
     if (not force_refresh) and cached and (now - float(cached.get("_cached_at", 0))) <= max_age_seconds:
         return cached
+    if not force_refresh:
+        cached_probe = _cached_probe_session_payload()
+        if cached_probe:
+            logger.info("Browser session sync skipped live bridge fetch: using cached global probe")
+            return cached_probe
     data = _session_request_sync(sso)
     if data:
         data = _merge_global_probe(data)
@@ -354,6 +404,11 @@ def get_browser_profile_session(max_age_seconds: int = 120, force_refresh: bool 
     now = time.time()
     if (not force_refresh) and cached and (now - float(cached.get("_cached_at", 0))) <= max_age_seconds:
         return cached
+    if not force_refresh:
+        cached_probe = _cached_probe_session_payload()
+        if cached_probe:
+            logger.info("Browser profile session sync skipped live bridge fetch: using cached global probe")
+            return cached_probe
     data = _session_request_sync("")
     if data:
         data = _merge_global_probe(data)
@@ -398,6 +453,16 @@ def refresh_browser_probe(token: str = "", wait: bool = True) -> Dict[str, Any]:
         _PROBE_REFRESH_LOCK.release()
 
 
+async def refresh_browser_probe_managed(token: str = "", wait: bool = True, shutdown_after: bool = True) -> Dict[str, Any]:
+    """Start bridge on demand, refresh probe once, then optionally stop it."""
+    await _ensure_bridge_started()
+    try:
+        return await asyncio.to_thread(refresh_browser_probe, token, wait)
+    finally:
+        if shutdown_after:
+            await _stop_bridge_after_refresh()
+
+
 def wait_for_browser_probe_refresh(timeout_seconds: float = 8.0) -> bool:
     """Wait briefly when a background probe refresh is already preparing fresher headers."""
     if not bridge_enabled() or not get_config("cloakbrowser.sync_session", True):
@@ -416,22 +481,9 @@ def wait_for_browser_probe_refresh(timeout_seconds: float = 8.0) -> bool:
 
 async def warmup_browser_session(token: str) -> Dict[str, Any]:
     sso = _extract_raw_sso(token)
-    data = await asyncio.to_thread(get_browser_session, token, 0, True)
+    data = await asyncio.to_thread(get_browser_session, token, 120, False)
     if not sso or _has_captured_app_chat_headers(data):
         return data
-
-    logger.info("Browser session lacks app-chat headers, running visible browser probe")
-    probe_data = await asyncio.to_thread(_probe_request_sync, sso, False)
-    if probe_data:
-        _cache_session(sso, probe_data)
-        logger.info(
-            "Browser session probe complete: "
-            f"cookie_len={len(str(probe_data.get('cookie_header') or ''))}, "
-            f"ua={'yes' if probe_data.get('user_agent') else 'no'}, "
-            f"statsig={'yes' if probe_data.get('x_statsig_id') else 'no'}, "
-            f"header_keys={len((probe_data.get('request_headers') or {}) if isinstance(probe_data.get('request_headers'), dict) else {})}"
-        )
-        return probe_data
     return data
 
 
@@ -457,8 +509,28 @@ async def prewarm_browser_sessions() -> None:
         return
     if not get_config("cloakbrowser.prewarm_on_start", True):
         return
+    if _has_reusable_probe_source():
+        logger.info("Browser session prewarm skipped: existing manual statsig or reusable probe cache found")
+        return
 
     mode = str(get_config("cloakbrowser.prewarm_mode", "session") or "session").strip().lower()
+    if mode == "probe" and _global_probe_enabled():
+        logger.info("Browser session prewarm started: mode=probe, strategy=single_global_probe")
+        try:
+            if get_config("cloakbrowser.profile_session", True):
+                await asyncio.to_thread(get_browser_profile_session, 0, True)
+            probe_data = await asyncio.to_thread(refresh_browser_probe, "", True)
+            logger.info(
+                "Browser session prewarm completed: "
+                f"strategy=single_global_probe, statsig={'yes' if (probe_data or {}).get('x_statsig_id') else 'no'}"
+            )
+        except Exception as exc:
+            logger.warning(
+                "Browser global probe prewarm skipped: "
+                f"{exc}. 应用将继续启动，并在首次真实对话时再尝试获取 probe。"
+            )
+        return
+
     configured_tokens = await _collect_configured_tokens()
     tokens = list(dict.fromkeys(_extract_raw_sso(token) for token in configured_tokens))
     tokens = [token for token in tokens if token]

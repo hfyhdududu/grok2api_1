@@ -158,14 +158,16 @@ profile_session = true
 global_probe = true
 # HTTP reverse 遇到 403 时是否强制刷新 temporary probe 并重试一次
 refresh_probe_on_403 = true
-# HTTP reverse 收到 200/SSE 开始时，立即后台刷新 temporary probe 给下一轮使用
-refresh_probe_on_sse_start = true
+# HTTP reverse 收到 200/SSE 开始时，是否立即后台刷新 temporary probe 给下一轮使用
+# 默认关闭：优先长期复用同一份可用 statsig，只有 403/显式刷新时再更新
+refresh_probe_on_sse_start = false
 # HTTP reverse 发起请求前，如后台 probe 正在刷新，是否短暂等待其完成
 wait_probe_before_request = true
 # 请求前等待后台 probe 刷新的最长时间（秒）
 wait_probe_timeout = 8
 # 每次 HTTP reverse 成功完成流式对话后，后台刷新 temporary probe 给下一次使用
-refresh_probe_after_success = true
+# 默认关闭：避免无必要地轮换 still-valid 的 x-statsig-id
+refresh_probe_after_success = false
 # 全局 probe 持久化文件
 probe_cache_file = "data/cloakbrowser-probe.json"
 # 全局 probe 缓存 TTL（秒），0 表示不过期
@@ -174,6 +176,10 @@ probe_cache_ttl_seconds = 0
 private_chat_url = "https://grok.com/"
 # 临时会话 probe 文本
 probe_message = "你好"
+# 手动指定 x-statsig-id；留空则优先使用浏览器捕获值
+manual_statsig_id = ""
+# 手动提供完整浏览器 Cookie JSON（数组格式）；Docker/无宿主浏览器场景推荐使用
+session_cookies_json = ""
 # 是否让 probe 请求真正发送到 Grok；false 表示只捕获真实浏览器生成的 headers，不消耗 statsig
 probe_consume_upstream = false
 # Node 可执行文件

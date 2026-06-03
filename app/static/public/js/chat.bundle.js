@@ -6919,18 +6919,23 @@ ${renderedAnswer}`.trim();
       modelPicker.classList.remove("open");
       modelPickerMenu.classList.add("hidden");
       modelPickerBtn.setAttribute("aria-expanded", "false");
+      document.body.classList.remove("model-picker-open");
+      restoreModelPickerMenu();
     }
     function openModelPicker() {
       if (!modelPicker || !modelPickerMenu || !modelPickerBtn) return;
+      positionModelPickerMenu();
       modelPicker.classList.add("open");
       modelPickerMenu.classList.remove("hidden");
       modelPickerBtn.setAttribute("aria-expanded", "true");
+      document.body.classList.add("model-picker-open");
     }
     function setModelValue(modelId) {
       if (!modelSelect || !modelId) return;
       modelSelect.value = modelId;
       if (modelPickerLabel) {
-        modelPickerLabel.textContent = modelId;
+        modelPickerLabel.textContent = formatModelLabel(modelId);
+        modelPickerLabel.title = modelId;
       }
       if (modelPickerMenu) {
         const options = modelPickerMenu.querySelectorAll(".model-option");
@@ -6949,6 +6954,38 @@ ${renderedAnswer}`.trim();
       modelSelect.innerHTML = "";
       modelPickerMenu.innerHTML = "";
       availableModels = Array.isArray(models) ? models.slice() : [];
+      const quickModels = [
+        { id: "grok-4.20-auto", title: "Auto", subtitle: "Chooses Fast or Expert" },
+        { id: "grok-4.20-fast", title: "Fast", subtitle: "Powered by Grok 4.20" },
+        { id: "grok-4.20-expert", title: "Expert", subtitle: "Powered by Grok 4.20" },
+        { id: "grok-4.20-heavy", title: "Heavy", subtitle: "Team of Experts" }
+      ].filter((item) => availableModels.includes(item.id));
+      if (quickModels.length) {
+        const quickWrap = document.createElement("div");
+        quickWrap.className = "model-quick-grid";
+        quickModels.forEach((item) => {
+          const quickBtn = document.createElement("button");
+          quickBtn.type = "button";
+          quickBtn.className = "model-option model-option-quick";
+          quickBtn.title = item.id;
+          quickBtn.dataset.value = item.id;
+          quickBtn.setAttribute("role", "option");
+          quickBtn.innerHTML = `
+          <span class="model-option-title">${item.title}</span>
+          <span class="model-option-subtitle">${item.subtitle}</span>
+        `;
+          quickBtn.addEventListener("click", () => {
+            setModelValue(item.id);
+            closeModelPicker();
+          });
+          quickWrap.appendChild(quickBtn);
+        });
+        modelPickerMenu.appendChild(quickWrap);
+        const divider = document.createElement("div");
+        divider.className = "model-option-divider";
+        divider.textContent = "\u5176\u4ED6\u6A21\u578B";
+        modelPickerMenu.appendChild(divider);
+      }
       availableModels.forEach((id) => {
         const option = document.createElement("option");
         option.value = id;
@@ -6957,9 +6994,13 @@ ${renderedAnswer}`.trim();
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "model-option";
-        btn.textContent = id;
+        btn.title = id;
         btn.dataset.value = id;
         btn.setAttribute("role", "option");
+        btn.innerHTML = `
+        <span class="model-option-title">${formatModelLabel(id)}</span>
+        <span class="model-option-id">${id}</span>
+      `;
         btn.addEventListener("click", () => {
           setModelValue(id);
           closeModelPicker();
@@ -6969,7 +7010,7 @@ ${renderedAnswer}`.trim();
     }
     async function loadModels() {
       if (!modelSelect) return;
-      const fallback = ["grok-4.1-fast", "grok-4", "grok-3", "grok-3-mini", "grok-3-thinking", "grok-4.20-fast", "grok-4.20-expert", "grok-4.20-auto", "grok-4.3-beta"];
+      const fallback = ["grok-4.1-fast", "grok-4", "grok-3", "grok-3-mini", "grok-3-thinking", "grok-4.20-fast", "grok-4.20-expert", "grok-4.20-auto"];
       const preferred = "grok-4.20-auto";
       let list = fallback;
       try {
@@ -7106,6 +7147,63 @@ ${renderedAnswer}`.trim();
         reader.onerror = () => reject(new Error("\u6587\u4EF6\u8BFB\u53D6\u5931\u8D25"));
         reader.readAsArrayBuffer(file);
       });
+    }
+    function positionModelPickerMenu() {
+      if (!modelPicker || !modelPickerMenu || !modelPickerBtn) return;
+      const isMobile = window.matchMedia("(max-width: 640px)").matches;
+      if (!isMobile) {
+        restoreModelPickerMenu();
+        return;
+      }
+      document.body.appendChild(modelPickerMenu);
+      const rect = modelPickerBtn.getBoundingClientRect();
+      const left = 12;
+      const right = 12;
+      const safeBottom = 12;
+      const bottomOffset = Math.max(window.innerHeight - rect.top + safeBottom, 88);
+      const maxHeight = Math.min(window.innerHeight * 0.52, Math.max(rect.top - 20, 220));
+      modelPickerMenu.style.left = `${left}px`;
+      modelPickerMenu.style.right = `${right}px`;
+      modelPickerMenu.style.top = "auto";
+      modelPickerMenu.style.bottom = `${bottomOffset}px`;
+      modelPickerMenu.style.width = "auto";
+      modelPickerMenu.style.maxHeight = `${maxHeight}px`;
+    }
+    function restoreModelPickerMenu() {
+      if (!modelPicker || !modelPickerMenu) return;
+      if (modelPickerMenu.parentElement !== modelPicker) {
+        modelPicker.appendChild(modelPickerMenu);
+      }
+      modelPickerMenu.style.left = "";
+      modelPickerMenu.style.right = "";
+      modelPickerMenu.style.top = "";
+      modelPickerMenu.style.bottom = "";
+      modelPickerMenu.style.width = "";
+      modelPickerMenu.style.maxHeight = "";
+    }
+    function formatModelLabel(modelId) {
+      const id = String(modelId || "").trim();
+      const friendly = {
+        "grok-4.20-auto": "Grok 4.20 Auto",
+        "grok-4.20-fast": "Grok 4.20 Fast",
+        "grok-4.20-expert": "Grok 4.20 Expert",
+        "grok-4.20-heavy": "Grok 4.20 Heavy",
+        "grok-4.20-multi-agent-0309": "Grok 4.20 Multi-Agent",
+        "grok-4.20-0309": "Grok 4.20 0309",
+        "grok-4.20-0309-reasoning": "Grok 4.20 0309 Reasoning",
+        "grok-4.20-0309-non-reasoning": "Grok 4.20 0309 Non-Reasoning",
+        "grok-4.20-0309-super": "Grok 4.20 0309 Super",
+        "grok-4.20-0309-reasoning-super": "Grok 4.20 0309 Reasoning Super",
+        "grok-4.20-0309-non-reasoning-super": "Grok 4.20 0309 Non-Reasoning Super",
+        "grok-4.20-0309-heavy": "Grok 4.20 0309 Heavy",
+        "grok-4.20-0309-reasoning-heavy": "Grok 4.20 0309 Reasoning Heavy",
+        "grok-4.20-0309-non-reasoning-heavy": "Grok 4.20 0309 Non-Reasoning Heavy",
+        "grok-4.1-fast": "Grok 4.1 Fast",
+        "grok-4.1-expert": "Grok 4.1 Expert",
+        "grok-4.1-mini": "Grok 4.1 Mini",
+        "grok-4.1-thinking": "Grok 4.1 Thinking"
+      };
+      return friendly[id] || id;
     }
     async function saveChatFileAttachment(file, safeName) {
       if (!(file instanceof Blob)) {
@@ -7638,6 +7736,11 @@ ${renderedAnswer}`.trim();
           return;
         }
         toggleSettings(false);
+      });
+      window.addEventListener("resize", () => {
+        if (modelPicker && modelPicker.classList.contains("open")) {
+          positionModelPickerMenu();
+        }
       });
       if (promptInput) {
         let composing = false;

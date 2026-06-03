@@ -323,8 +323,10 @@ def build_headers(cookie_token: str, content_type: Optional[str] = None, origin:
         headers["Sec-Fetch-Site"] = "same-site"
 
     # X-Statsig-ID and X-XAI-Request-ID
+    manual_statsig = str(get_config("cloakbrowser.manual_statsig_id", "") or "").strip()
     headers["x-statsig-id"] = (
-        str(session.get("x_statsig_id") or "").strip()
+        manual_statsig
+        or str(session.get("x_statsig_id") or "").strip()
         or headers.get("x-statsig-id")
         or StatsigGenerator.gen_id(cookie_token)
     )
@@ -340,6 +342,7 @@ def build_headers(cookie_token: str, content_type: Optional[str] = None, origin:
     safe_headers["SessionSource"] = "browser" if session_cookie_header else "fallback"
     safe_headers["SessionCookieLen"] = len(session_cookie_header or "")
     safe_headers["SessionHasStatsig"] = bool(session.get("x_statsig_id"))
+    safe_headers["ManualStatsig"] = bool(manual_statsig)
     safe_headers["CapturedHeaderKeys"] = (
         sorted([str(key) for key in captured_headers.keys()])
         if isinstance(captured_headers, dict)

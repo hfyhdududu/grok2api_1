@@ -143,6 +143,9 @@ async def start() -> None:
     env["GROK_CLOAK_PROBE_MESSAGE"] = str(
         get_config("cloakbrowser.probe_message", "你好") or "你好"
     )
+    env["GROK_CLOAK_SESSION_COOKIES_JSON"] = str(
+        get_config("cloakbrowser.session_cookies_json", "") or ""
+    )
     env["GROK_CLOAK_PROBE_CONSUME_UPSTREAM"] = (
         "true" if bool(get_config("cloakbrowser.probe_consume_upstream", False)) else "false"
     )
