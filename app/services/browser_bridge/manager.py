@@ -5,6 +5,7 @@ Embedded CloakBrowser chat bridge process manager.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import subprocess
@@ -22,6 +23,39 @@ LOG_FILE = LOG_DIR / "cloakbrowser_bridge.log"
 PID_FILE = LOG_DIR / "cloakbrowser_bridge.pid"
 
 _process: Optional[subprocess.Popen] = None
+
+
+def _probe_cache_path() -> Path:
+    configured = str(
+        get_config("cloakbrowser.probe_cache_file", "data/cloakbrowser-probe.json")
+        or "data/cloakbrowser-probe.json"
+    ).strip()
+    path = Path(configured)
+    if not path.is_absolute():
+        path = (BASE_DIR.parent.parent.parent / path).resolve()
+    return path
+
+
+def _load_cached_probe_for_env() -> dict:
+    path = _probe_cache_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning(f"Load cached probe for bridge env failed: {exc}")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    headers = data.get("request_headers") if isinstance(data.get("request_headers"), dict) else {}
+    statsig = str(data.get("x_statsig_id") or headers.get("x-statsig-id") or "").strip()
+    if not statsig or not headers:
+        return {}
+    return {
+        "user_agent": str(data.get("user_agent", "") or ""),
+        "request_headers": headers,
+        "x_statsig_id": statsig,
+    }
 
 
 def bridge_url() -> str:
@@ -145,6 +179,15 @@ async def start() -> None:
     )
     env["GROK_CLOAK_SESSION_COOKIES_JSON"] = str(
         get_config("cloakbrowser.session_cookies_json", "") or ""
+    )
+    probe = _load_cached_probe_for_env() or {}
+    env["GROK_CLOAK_CACHED_PROBE_JSON"] = json.dumps(
+        {
+            "user_agent": str(probe.get("user_agent", "") or ""),
+            "request_headers": probe.get("request_headers") or {},
+            "x_statsig_id": str(probe.get("x_statsig_id", "") or ""),
+        },
+        ensure_ascii=False,
     )
     env["GROK_CLOAK_PROBE_CONSUME_UPSTREAM"] = (
         "true" if bool(get_config("cloakbrowser.probe_consume_upstream", False)) else "false"

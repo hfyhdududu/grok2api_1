@@ -26,6 +26,7 @@ const HOME_URL = "https://grok.com/";
 const PRIVATE_CHAT_URL = process.env.GROK_CLOAK_PRIVATE_CHAT_URL || HOME_URL;
 const PROBE_MESSAGE = process.env.GROK_CLOAK_PROBE_MESSAGE || "你好";
 const SESSION_COOKIES_JSON = (process.env.GROK_CLOAK_SESSION_COOKIES_JSON || "").trim();
+const CACHED_PROBE_JSON = (process.env.GROK_CLOAK_CACHED_PROBE_JSON || "").trim();
 const PROBE_CONSUME_UPSTREAM = String(process.env.GROK_CLOAK_PROBE_CONSUME_UPSTREAM || "false").toLowerCase() === "true";
 
 function parseInjectedCookies() {
@@ -65,6 +66,31 @@ function parseInjectedCookies() {
     log(`session cookies json parse failed: ${error.message}`);
     return [];
   }
+}
+
+function parseCachedProbe() {
+  if (!CACHED_PROBE_JSON) return {};
+  try {
+    const parsed = JSON.parse(CACHED_PROBE_JSON);
+    if (!parsed || typeof parsed !== "object") return {};
+    return {
+      user_agent: String(parsed.user_agent || "").trim(),
+      x_statsig_id: String(parsed.x_statsig_id || "").trim(),
+      request_headers:
+        parsed.request_headers && typeof parsed.request_headers === "object"
+          ? parsed.request_headers
+          : {},
+    };
+  } catch (error) {
+    log(`cached probe json parse failed: ${error.message}`);
+    return {};
+  }
+}
+
+const CACHED_PROBE = parseCachedProbe();
+
+function getEffectiveUserAgent() {
+  return CACHED_PROBE.user_agent || "";
 }
 
 function buildTemporaryProbePayload(basePayload = {}, pageInfo = {}) {
@@ -243,8 +269,12 @@ async function ensureBrowser() {
       "--no-sandbox",
     ],
   };
+  const effectiveUserAgent = getEffectiveUserAgent();
   if (EXECUTABLE_PATH) {
     launchOptions.executablePath = EXECUTABLE_PATH;
+  }
+  if (effectiveUserAgent) {
+    launchOptions.userAgent = effectiveUserAgent;
   }
 
   const userDataDir = ensureProfileDir();
@@ -268,6 +298,7 @@ async function ensureBrowser() {
 
 async function createContextWithCookies(playwrightBrowser, sso) {
   const injectedCookies = parseInjectedCookies();
+  const effectiveUserAgent = getEffectiveUserAgent();
   const authCookies = [];
   if (sso) {
     authCookies.push(
@@ -290,6 +321,7 @@ async function createContextWithCookies(playwrightBrowser, sso) {
 
   const context = await playwrightBrowser.newContext({
     viewport: { width: 1600, height: 1000 },
+    ...(effectiveUserAgent ? { userAgent: effectiveUserAgent } : {}),
   });
   if (cookiesToAdd.length) {
     await context.addCookies(cookiesToAdd);
