@@ -255,7 +255,9 @@ def build_headers(cookie_token: str, content_type: Optional[str] = None, origin:
     Returns:
         Dict[str, str]: The headers dictionary.
     """
-    session = get_browser_session(cookie_token)
+    browser_bridge_enabled = bool(get_config("cloakbrowser.enabled", False))
+    sync_browser_session = bool(get_config("cloakbrowser.sync_session", False))
+    session = get_browser_session(cookie_token) if (browser_bridge_enabled and sync_browser_session) else {}
     user_agent = _sanitize_header_value(
         session.get("user_agent") or get_config("proxy.user_agent"),
         field_name="proxy.user_agent",
@@ -343,6 +345,8 @@ def build_headers(cookie_token: str, content_type: Optional[str] = None, origin:
     safe_headers["SessionCookieLen"] = len(session_cookie_header or "")
     safe_headers["SessionHasStatsig"] = bool(session.get("x_statsig_id"))
     safe_headers["ManualStatsig"] = bool(manual_statsig)
+    safe_headers["BrowserBridgeEnabled"] = browser_bridge_enabled
+    safe_headers["BrowserSyncSession"] = sync_browser_session
     safe_headers["CapturedHeaderKeys"] = (
         sorted([str(key) for key in captured_headers.keys()])
         if isinstance(captured_headers, dict)

@@ -206,18 +206,18 @@ const LOCALE_MAP = {
 
   "cloakbrowser": {
     "label": "CloakBrowser",
-    "enabled": { title: "启用浏览器桥", desc: "启用后通过真实浏览器建立 Grok 会话，并为 HTTP reverse 提供可复用的真实请求头。" },
+    "enabled": { title: "启用浏览器桥", desc: "默认不需要开启。仅在动态 Statsig 方案仍被 403 时，再启用真实浏览器增强修复。" },
     "headless": { title: "无头模式", desc: "关闭后可看到真实浏览器窗口，便于手动过验证和观察页面状态。" },
     "global_probe": { title: "全局 Probe", desc: "启用后同一份 x-statsig-id 和请求头可被多个 SSO 复用。" },
     "refresh_probe_on_403": { title: "403 时刷新 Probe", desc: "当 chat 请求返回 403 时，强制重新抓取一次真实浏览器 probe 并重试。" },
     "statsig_auto_refresh_enabled": { title: "启用定时刷新 Statsig", desc: "开启后，程序会按设定时间自动刷新一次 x-statsig-id，行为类似 FlareSolverr 的定时刷新。" },
     "statsig_refresh_interval": { title: "Statsig 刷新间隔（秒）", desc: "定时刷新 x-statsig-id 的时间间隔。建议先保守设置，比如 1800 秒或更长。" },
-    "sync_session": { title: "同步真实会话", desc: "启用后将浏览器抓到的 Cookie、UA 和请求头同步给 HTTP reverse。" },
+    "sync_session": { title: "同步真实会话", desc: "启用后将浏览器抓到的 Cookie、UA 和请求头同步给 HTTP reverse。默认关闭，优先使用上游动态 Statsig 方案。" },
     "profile_session": { title: "复用浏览器 Profile", desc: "允许直接使用浏览器 profile 中已登录的 Grok 会话。" },
     "session_cookies_json": { title: "会话 Cookies JSON", desc: "可粘贴完整浏览器 Cookie 数组。Docker 或独立浏览器环境推荐使用，用于注入已登录 Grok 会话。" },
     "manual_statsig_id": { title: "手动 Statsig", desc: "可手动填入一个长期有效的 x-statsig-id。填入后优先于浏览器自动捕获值。" },
-    "prewarm_on_start": { title: "启动预热", desc: "服务启动时自动准备浏览器会话与 probe。" },
-    "prewarm_blocking": { title: "阻塞预热", desc: "启用后应用启动完成前会等待浏览器预热结束。" },
+    "prewarm_on_start": { title: "启动预热", desc: "服务启动时自动准备浏览器会话与 probe。默认关闭，避免无必要拉起浏览器。" },
+    "prewarm_blocking": { title: "阻塞预热", desc: "启用后应用启动完成前会等待浏览器预热结束。通常不建议开启。" },
     "prewarm_mode": { title: "预热模式", desc: "session 只同步会话，probe 还会抓一份可复用的真实 chat headers。" },
     "refresh_probe_on_sse_start": { title: "SSE 开始后自动刷新", desc: "收到流式响应开头时就后台刷新下一份 probe。建议关闭，优先长期复用当前有效 statsig。" },
     "wait_probe_before_request": { title: "请求前等待 Probe", desc: "若后台正在刷新 probe，请求发起前短暂等待其完成。" },
@@ -232,7 +232,7 @@ const LOCALE_MAP = {
 const SECTION_DESCRIPTIONS = {
   "proxy": "配置不正确将导致 403 错误。服务首次请求 Grok 时的 IP 必须与获取 CF Clearance 时的 IP 一致，后续服务器请求 IP 变化不会导致 403。",
   "model_routing": "这里可以手动指定每个模型优先走哪个 Token 池。未配置的模型仍会按系统默认路由。",
-  "cloakbrowser": "这里保留的是和抗 403 修复直接相关的核心项。通常推荐：开启全局 Probe，关闭成功后自动刷新，只有 403 或你手动点击时再更新 x-statsig-id。"
+  "cloakbrowser": "这里是浏览器增强修复。默认推荐先不启用，优先使用上游动态 Statsig 方案；只有仍然遇到 403 时，再启用真实浏览器抓取会话与 probe。"
 };
 
 // CF 自动刷新联动禁用字段（全部在 proxy section 内）

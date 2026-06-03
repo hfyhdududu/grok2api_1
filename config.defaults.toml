@@ -143,11 +143,11 @@ max_pages = 4
 # 是否优先走浏览器链路
 chat_first = true
 # 是否将浏览器会话同步给 HTTP reverse
-sync_session = true
+sync_session = false
 # 启动时是否预热浏览器会话
-prewarm_on_start = true
+prewarm_on_start = false
 # 预热是否阻塞应用启动完成；session 模式只访问官网，不发送对话
-prewarm_blocking = true
+prewarm_blocking = false
 # 预热模式：session=仅访问官网同步 cookie/UA；probe=发送一次探针捕获完整 chat headers
 prewarm_mode = "session"
 # 预热并发数
@@ -155,9 +155,9 @@ prewarm_concurrency = 1
 # 是否允许不传 sso 时从浏览器 profile 导出已登录会话
 profile_session = true
 # 是否允许复用一份全局 probe headers 给多个 sso
-global_probe = true
+global_probe = false
 # HTTP reverse 遇到 403 时是否强制刷新 temporary probe 并重试一次
-refresh_probe_on_403 = true
+refresh_probe_on_403 = false
 # 是否启用 x-statsig-id 定时刷新
 statsig_auto_refresh_enabled = false
 # x-statsig-id 定时刷新间隔（秒）
