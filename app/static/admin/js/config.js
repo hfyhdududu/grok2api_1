@@ -3,6 +3,7 @@ let currentConfig = {};
 let modelRoutingMeta = { models: [], pools: ['ssoBasic', 'ssoSuper'] };
 let modelRoutingAssignments = {};
 let modelRoutingDragId = '';
+let currentConfigTab = 'runtime';
 let currentStatsigInfo = {
   enabled: false,
   x_statsig_id: '',
@@ -13,6 +14,13 @@ let currentStatsigInfo = {
   header_keys: []
 };
 const byId = (id) => document.getElementById(id);
+const CONFIG_TAB_GROUPS = [
+  { id: 'runtime', label: '系统配置', sections: ['app', 'chat', 'video', 'voice'] },
+  { id: 'generation', label: '生成与资源', sections: ['image', 'asset', 'nsfw', 'usage'] },
+  { id: 'scheduling', label: '任务调度', sections: ['token', 'retry', 'model_routing'] },
+  { id: 'network', label: '网络代理', sections: ['proxy', 'cloakbrowser', '__statsig__'] },
+  { id: 'storage', label: '缓存存储', sections: ['cache'] }
+];
 const NUMERIC_FIELDS = new Set([
   'timeout',
   'max_retry',
@@ -199,22 +207,24 @@ const LOCALE_MAP = {
   "cloakbrowser": {
     "label": "CloakBrowser",
     "enabled": { title: "启用浏览器桥", desc: "启用后通过真实浏览器建立 Grok 会话，并为 HTTP reverse 提供可复用的真实请求头。" },
+    "headless": { title: "无头模式", desc: "关闭后可看到真实浏览器窗口，便于手动过验证和观察页面状态。" },
+    "global_probe": { title: "全局 Probe", desc: "启用后同一份 x-statsig-id 和请求头可被多个 SSO 复用。" },
+    "refresh_probe_on_403": { title: "403 时刷新 Probe", desc: "当 chat 请求返回 403 时，强制重新抓取一次真实浏览器 probe 并重试。" },
+    "statsig_auto_refresh_enabled": { title: "启用定时刷新 Statsig", desc: "开启后，程序会按设定时间自动刷新一次 x-statsig-id，行为类似 FlareSolverr 的定时刷新。" },
+    "statsig_refresh_interval": { title: "Statsig 刷新间隔（秒）", desc: "定时刷新 x-statsig-id 的时间间隔。建议先保守设置，比如 1800 秒或更长。" },
     "sync_session": { title: "同步真实会话", desc: "启用后将浏览器抓到的 Cookie、UA 和请求头同步给 HTTP reverse。" },
+    "profile_session": { title: "复用浏览器 Profile", desc: "允许直接使用浏览器 profile 中已登录的 Grok 会话。" },
+    "session_cookies_json": { title: "会话 Cookies JSON", desc: "可粘贴完整浏览器 Cookie 数组。Docker 或独立浏览器环境推荐使用，用于注入已登录 Grok 会话。" },
+    "manual_statsig_id": { title: "手动 Statsig", desc: "可手动填入一个长期有效的 x-statsig-id。填入后优先于浏览器自动捕获值。" },
     "prewarm_on_start": { title: "启动预热", desc: "服务启动时自动准备浏览器会话与 probe。" },
     "prewarm_blocking": { title: "阻塞预热", desc: "启用后应用启动完成前会等待浏览器预热结束。" },
     "prewarm_mode": { title: "预热模式", desc: "session 只同步会话，probe 还会抓一份可复用的真实 chat headers。" },
-    "profile_session": { title: "复用浏览器 Profile", desc: "允许直接使用浏览器 profile 中已登录的 Grok 会话。" },
-    "global_probe": { title: "全局 Probe", desc: "启用后同一份 x-statsig-id 和请求头可被多个 SSO 复用。" },
-    "refresh_probe_on_403": { title: "403 时刷新 Probe", desc: "当 chat 请求返回 403 时，强制重新抓取一次真实浏览器 probe 并重试。" },
     "refresh_probe_on_sse_start": { title: "SSE 开始后自动刷新", desc: "收到流式响应开头时就后台刷新下一份 probe。建议关闭，优先长期复用当前有效 statsig。" },
     "wait_probe_before_request": { title: "请求前等待 Probe", desc: "若后台正在刷新 probe，请求发起前短暂等待其完成。" },
     "wait_probe_timeout": { title: "等待 Probe 超时", desc: "请求前等待后台 probe 完成的最长时间（秒）。" },
     "refresh_probe_after_success": { title: "成功后自动刷新", desc: "每次 chat 成功结束后刷新下一份 probe。建议关闭，避免无必要轮换 x-statsig-id。" },
     "private_chat_url": { title: "Probe 入口 URL", desc: "浏览器抓取 probe 时优先进入的页面地址。" },
-    "probe_message": { title: "Probe 文本", desc: "触发真实浏览器 app-chat 请求时发送的探针文本。" },
-    "manual_statsig_id": { title: "手动 Statsig", desc: "可手动填入一个长期有效的 x-statsig-id。填入后优先于浏览器自动捕获值。" },
-    "session_cookies_json": { title: "会话 Cookies JSON", desc: "可粘贴完整浏览器 Cookie 数组。Docker 或独立浏览器环境推荐使用，用于注入已登录 Grok 会话。" },
-    "headless": { title: "无头模式", desc: "关闭后可看到真实浏览器窗口，便于手动过验证和观察页面状态。" }
+    "probe_message": { title: "Probe 文本", desc: "触发真实浏览器 app-chat 请求时发送的探针文本。" }
   }
 };
 
@@ -228,6 +238,7 @@ const SECTION_DESCRIPTIONS = {
 // CF 自动刷新联动禁用字段（全部在 proxy section 内）
 const CF_MANAGED_PROXY_KEYS = ['cf_clearance', 'browser', 'user_agent'];
 const CF_REFRESH_SUB_KEYS = ['flaresolverr_url', 'refresh_interval', 'timeout'];
+const STATSIG_REFRESH_SUB_KEYS = ['statsig_refresh_interval'];
 
 const SECTION_ORDER = new Map(Object.keys(LOCALE_MAP).map((key, index) => [key, index]));
 const HIDDEN_CONFIG_KEYS = new Map([
@@ -435,6 +446,7 @@ async function loadData() {
     });
     if (res.ok) {
       currentConfig = await res.json();
+      ensureConfigShape(currentConfig);
       renderConfig(currentConfig);
     } else if (res.status === 401) {
       logout();
@@ -444,112 +456,169 @@ async function loadData() {
   }
 }
 
+function ensureConfigShape(data) {
+  if (!data || typeof data !== 'object') return;
+  if (!data.cloakbrowser || typeof data.cloakbrowser !== 'object') {
+    data.cloakbrowser = {};
+  }
+  if (!Object.prototype.hasOwnProperty.call(data.cloakbrowser, 'statsig_auto_refresh_enabled')) {
+    data.cloakbrowser.statsig_auto_refresh_enabled = false;
+  }
+  if (!Object.prototype.hasOwnProperty.call(data.cloakbrowser, 'statsig_refresh_interval')) {
+    data.cloakbrowser.statsig_refresh_interval = 1800;
+  }
+}
+
 function renderConfig(data) {
   const container = byId('config-container');
   if (!container) return;
   container.replaceChildren();
+  renderConfigTabs();
 
-  const fragment = document.createDocumentFragment();
   const sections = sortByOrder(Object.keys(data), SECTION_ORDER);
-  let cloakbrowserCardInserted = false;
-
+  const sectionCardMap = new Map();
   sections.forEach(section => {
-    const items = data[section];
-    const localeSection = LOCALE_MAP[section];
-    const keyOrder = localeSection ? new Map(Object.keys(localeSection).map((k, i) => [k, i])) : null;
-
-    const allKeys = sortByOrder(Object.keys(items), keyOrder);
-    const hiddenKeys = HIDDEN_CONFIG_KEYS.get(section) || new Set();
-    const visibleKeys = allKeys.filter(key => !(section === 'proxy' && key === 'cf_cookies') && !hiddenKeys.has(key));
-
-    if (visibleKeys.length > 0) {
-      const card = document.createElement('div');
-      card.className = 'config-section';
-
-      const header = document.createElement('div');
-      header.innerHTML = `<div class="config-section-title">${getSectionLabel(section)}</div>`;
-
-      if (section === 'proxy') {
-        const actionRow = document.createElement('div');
-        actionRow.className = 'config-section-actions';
-
-        const refreshBtn = document.createElement('button');
-        refreshBtn.type = 'button';
-        refreshBtn.id = 'cf-refresh-btn';
-        refreshBtn.className = 'geist-button-outline gap-2';
-        refreshBtn.innerHTML = `
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 2v6h-6"></path>
-            <path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path>
-            <path d="M3 22v-6h6"></path>
-            <path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path>
-          </svg>
-          手动刷新 CF
-        `;
-        refreshBtn.addEventListener('click', manualRefreshCfClearance);
-        actionRow.appendChild(refreshBtn);
-        header.appendChild(actionRow);
-      }
-
-      // 添加部分说明（如果有）
-      if (SECTION_DESCRIPTIONS[section]) {
-        const descP = document.createElement('p');
-        descP.className = 'text-[var(--accents-4)] text-sm mt-1 mb-4';
-        descP.textContent = SECTION_DESCRIPTIONS[section];
-        header.appendChild(descP);
-      }
-      
-      card.appendChild(header);
-
-      const grid = document.createElement('div');
-      grid.className = 'config-grid';
-
-      visibleKeys.forEach(key => {
-        const fieldCard = buildFieldCard(section, key, items[key]);
-        grid.appendChild(fieldCard);
-      });
-
-      card.appendChild(grid);
-      if (section === 'app') {
-        const footerActions = document.createElement('div');
-        footerActions.className = 'config-footer-actions';
-        const clearLogsBtn = document.createElement('button');
-        clearLogsBtn.type = 'button';
-        clearLogsBtn.id = 'clear-logs-btn';
-        clearLogsBtn.className = 'geist-button-danger gap-2';
-        clearLogsBtn.innerHTML = `
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M3 6h18"></path>
-            <path d="M8 6V4h8v2"></path>
-            <path d="M19 6l-1 14H6L5 6"></path>
-            <path d="M10 11v6"></path>
-            <path d="M14 11v6"></path>
-          </svg>
-          清空日志文件夹
-        `;
-        clearLogsBtn.addEventListener('click', clearLogsDirectory);
-        card.appendChild(footerActions);
-        footerActions.appendChild(clearLogsBtn);
-      }
-      if (grid.children.length > 0) {
-        fragment.appendChild(card);
-        if (section === 'cloakbrowser') {
-          fragment.appendChild(buildStatsigSectionCard());
-          cloakbrowserCardInserted = true;
-        }
-      }
+    const card = buildSectionCard(section, data[section]);
+    if (card) {
+      sectionCardMap.set(section, card);
     }
   });
 
-  if (!cloakbrowserCardInserted) {
-    fragment.appendChild(buildStatsigSectionCard());
-  }
+  CONFIG_TAB_GROUPS.forEach(group => {
+    const panel = document.createElement('section');
+    panel.className = `config-panel${group.id === currentConfigTab ? ' active' : ''}`;
+    panel.dataset.tab = group.id;
 
-  container.appendChild(fragment);
+    group.sections.forEach(section => {
+      if (section === '__statsig__') {
+        panel.appendChild(buildStatsigSectionCard());
+        return;
+      }
+      const card = sectionCardMap.get(section);
+      if (card) {
+        panel.appendChild(card);
+      }
+    });
+
+    if (!panel.children.length) {
+      const empty = document.createElement('div');
+      empty.className = 'text-center py-12 text-[var(--accents-4)]';
+      empty.textContent = '当前分类暂无配置项。';
+      panel.appendChild(empty);
+    }
+
+    container.appendChild(panel);
+  });
 
   // 初始化 CF 自动刷新联动状态
   const cfEnabled = data.proxy && data.proxy.enabled;
   applyCfRefreshState(cfEnabled);
+  const statsigRefreshEnabled = data.cloakbrowser && data.cloakbrowser.statsig_auto_refresh_enabled;
+  applyStatsigRefreshState(statsigRefreshEnabled);
+}
+
+function renderConfigTabs() {
+  const tabs = byId('config-tabs');
+  if (!tabs) return;
+  tabs.replaceChildren();
+
+  CONFIG_TAB_GROUPS.forEach(group => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `config-tab${group.id === currentConfigTab ? ' active' : ''}`;
+    btn.setAttribute('role', 'tab');
+    btn.setAttribute('aria-selected', group.id === currentConfigTab ? 'true' : 'false');
+    btn.textContent = group.label;
+    btn.addEventListener('click', () => {
+      currentConfigTab = group.id;
+      renderConfigTabs();
+      document.querySelectorAll('.config-panel').forEach(panel => {
+        panel.classList.toggle('active', panel.dataset.tab === currentConfigTab);
+      });
+    });
+    tabs.appendChild(btn);
+  });
+}
+
+function buildSectionCard(section, items) {
+  const localeSection = LOCALE_MAP[section];
+  const keyOrder = localeSection ? new Map(Object.keys(localeSection).map((k, i) => [k, i])) : null;
+
+  const allKeys = sortByOrder(Object.keys(items), keyOrder);
+  const hiddenKeys = HIDDEN_CONFIG_KEYS.get(section) || new Set();
+  const visibleKeys = allKeys.filter(key => !(section === 'proxy' && key === 'cf_cookies') && !hiddenKeys.has(key));
+  if (!visibleKeys.length) {
+    return null;
+  }
+
+  const card = document.createElement('div');
+  card.className = 'config-section';
+
+  const header = document.createElement('div');
+  header.innerHTML = `<div class="config-section-title">${getSectionLabel(section)}</div>`;
+
+  if (section === 'proxy') {
+    const actionRow = document.createElement('div');
+    actionRow.className = 'config-section-actions';
+
+    const refreshBtn = document.createElement('button');
+    refreshBtn.type = 'button';
+    refreshBtn.id = 'cf-refresh-btn';
+    refreshBtn.className = 'geist-button-outline gap-2';
+    refreshBtn.innerHTML = `
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 2v6h-6"></path>
+        <path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path>
+        <path d="M3 22v-6h6"></path>
+        <path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path>
+      </svg>
+      手动刷新 CF
+    `;
+    refreshBtn.addEventListener('click', manualRefreshCfClearance);
+    actionRow.appendChild(refreshBtn);
+    header.appendChild(actionRow);
+  }
+
+  if (SECTION_DESCRIPTIONS[section]) {
+    const descP = document.createElement('p');
+    descP.className = 'text-[var(--accents-4)] text-sm mt-1 mb-4';
+    descP.textContent = SECTION_DESCRIPTIONS[section];
+    header.appendChild(descP);
+  }
+
+  card.appendChild(header);
+
+  const grid = document.createElement('div');
+  grid.className = 'config-grid';
+  visibleKeys.forEach(key => {
+    const fieldCard = buildFieldCard(section, key, items[key]);
+    grid.appendChild(fieldCard);
+  });
+  card.appendChild(grid);
+
+  if (section === 'app') {
+    const footerActions = document.createElement('div');
+    footerActions.className = 'config-footer-actions';
+    const clearLogsBtn = document.createElement('button');
+    clearLogsBtn.type = 'button';
+    clearLogsBtn.id = 'clear-logs-btn';
+    clearLogsBtn.className = 'geist-button-danger gap-2';
+    clearLogsBtn.innerHTML = `
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M3 6h18"></path>
+        <path d="M8 6V4h8v2"></path>
+        <path d="M19 6l-1 14H6L5 6"></path>
+        <path d="M10 11v6"></path>
+        <path d="M14 11v6"></path>
+      </svg>
+      清空日志文件夹
+    `;
+    clearLogsBtn.addEventListener('click', clearLogsDirectory);
+    card.appendChild(footerActions);
+    footerActions.appendChild(clearLogsBtn);
+  }
+
+  return card;
 }
 
 function buildStatsigSectionCard() {
@@ -637,6 +706,24 @@ function buildStatsigPanel() {
   top.appendChild(titleBox);
   top.appendChild(btn);
 
+  const summary = document.createElement('div');
+  summary.className = 'grid gap-3 md:grid-cols-3';
+  const capturedAt = formatLocalDateTime(currentStatsigInfo.captured_at);
+  const headerCount = Array.isArray(currentStatsigInfo.header_keys) ? currentStatsigInfo.header_keys.length : 0;
+  [
+    { label: '当前来源', value: currentStatsigInfo.manual_statsig_id ? '手动填写' : (currentStatsigInfo.effective_statsig_id ? '浏览器捕获' : '未生效') },
+    { label: '最近捕获时间', value: capturedAt },
+    { label: '捕获 Header 数量', value: String(headerCount) }
+  ].forEach(item => {
+    const card = document.createElement('div');
+    card.className = 'rounded-xl border border-[var(--border)] bg-[var(--bg)] px-3 py-3';
+    card.innerHTML = `
+      <div class="text-[11px] text-[var(--accents-4)]">${escapeHtml(item.label)}</div>
+      <div class="mt-1 text-sm font-medium break-all">${escapeHtml(item.value)}</div>
+    `;
+    summary.appendChild(card);
+  });
+
   const effectiveLabel = document.createElement('div');
   effectiveLabel.className = 'text-xs font-medium text-[var(--accents-5)]';
   effectiveLabel.textContent = '当前生效值';
@@ -681,15 +768,13 @@ function buildStatsigPanel() {
 
   const meta = document.createElement('div');
   meta.className = 'text-xs text-[var(--accents-4)] flex flex-col gap-1';
-  const capturedAt = formatLocalDateTime(currentStatsigInfo.captured_at);
-  const headerCount = Array.isArray(currentStatsigInfo.header_keys) ? currentStatsigInfo.header_keys.length : 0;
   meta.innerHTML = `
     <div>来源优先级：手动填写 > 浏览器捕获 > 程序动态生成</div>
-    <div>最近捕获时间：${escapeHtml(capturedAt)}</div>
-    <div>捕获 Header 数量：${headerCount}</div>
+    <div>建议：优先长期复用一份稳定值，只有出现 403 或确认失效后再刷新。</div>
   `;
 
   wrap.appendChild(top);
+  wrap.appendChild(summary);
   wrap.appendChild(effectiveLabel);
   wrap.appendChild(input);
   wrap.appendChild(manualLabel);
@@ -1051,6 +1136,25 @@ function applyCfRefreshState(enabled) {
   CF_REFRESH_SUB_KEYS.forEach(k => setFieldDisabled('proxy', k, !enabled));
 }
 
+function applyStatsigRefreshState(enabled) {
+  function setFieldDisabled(section, key, disabled) {
+    const input = document.querySelector(
+      `input[data-section="${section}"][data-key="${key}"],` +
+      `textarea[data-section="${section}"][data-key="${key}"],` +
+      `select[data-section="${section}"][data-key="${key}"]`
+    );
+    if (!input) return;
+    input.disabled = disabled;
+    const field = input.closest('.config-field');
+    if (field) {
+      field.style.opacity = disabled ? '0.45' : '';
+      field.style.pointerEvents = disabled ? 'none' : '';
+    }
+  }
+
+  STATSIG_REFRESH_SUB_KEYS.forEach(k => setFieldDisabled('cloakbrowser', k, !enabled));
+}
+
 function buildFieldCard(section, key, val) {
   const text = getText(section, key);
 
@@ -1145,6 +1249,14 @@ function buildFieldCard(section, key, val) {
     fieldCard.style.opacity = '';
     built.input.addEventListener('change', () => {
       applyCfRefreshState(built.input.checked);
+    });
+  }
+
+  if (section === 'cloakbrowser' && key === 'statsig_auto_refresh_enabled' && built && built.input) {
+    fieldCard.style.pointerEvents = 'auto';
+    fieldCard.style.opacity = '';
+    built.input.addEventListener('change', () => {
+      applyStatsigRefreshState(built.input.checked);
     });
   }
 

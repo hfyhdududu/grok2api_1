@@ -98,6 +98,9 @@ async def lifespan(app: FastAPI):
     from app.services.cf_refresh import start as cf_refresh_start
     cf_refresh_start()
 
+    from app.services.statsig_refresh import start as statsig_refresh_start
+    statsig_refresh_start()
+
     if get_config("cloakbrowser.prewarm_on_start", True):
         from app.services.reverse.browser_bridge import prewarm_browser_sessions
 
@@ -116,6 +119,9 @@ async def lifespan(app: FastAPI):
 
     from app.services.cf_refresh import stop as cf_refresh_stop
     cf_refresh_stop()
+
+    from app.services.statsig_refresh import stop as statsig_refresh_stop
+    statsig_refresh_stop()
 
     from app.services.browser_bridge import stop as browser_bridge_stop
     await browser_bridge_stop()
