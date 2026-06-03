@@ -1,4 +1,7 @@
 (() => {
+  if (typeof window.requirePublicAccess === 'function') {
+    window.requirePublicAccess();
+  }
   const seedImageInput = document.getElementById('seedImageInput');
   const selectSeedBtn = document.getElementById('selectSeedBtn');
   const seedFileName = document.getElementById('seedFileName');

@@ -1,4 +1,7 @@
 (() => {
+  if (typeof window.requirePublicAccess === 'function') {
+    window.requirePublicAccess();
+  }
   let Room;
   let createLocalTracks;
   let RoomEvent;

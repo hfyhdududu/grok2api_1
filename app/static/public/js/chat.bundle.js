@@ -3494,6 +3494,9 @@
 
   // app/static/public/js/chat.js
   (() => {
+    if (typeof window.requirePublicAccess === "function") {
+      window.requirePublicAccess();
+    }
     const modelSelect = document.getElementById("modelSelect");
     const modelPicker = document.getElementById("modelPicker");
     const modelPickerBtn = document.getElementById("modelPickerBtn");
@@ -7024,7 +7027,7 @@ ${renderedAnswer}`.trim();
           }
           return;
         }
-        const res = await fetch("/v1/models", {
+        const res = await fetch("/v1/public/models", {
           cache: "no-store",
           headers: buildAuthHeaders(authHeader)
         });

@@ -5,6 +5,9 @@ import { StreamRenderer } from '../src/chat/stream_renderer.js';
 import { createChatSessionStore } from '../src/chat/chat_session_store.js';
 
 (() => {
+  if (typeof window.requirePublicAccess === 'function') {
+    window.requirePublicAccess();
+  }
   const modelSelect = document.getElementById('modelSelect');
   const modelPicker = document.getElementById('modelPicker');
   const modelPickerBtn = document.getElementById('modelPickerBtn');
@@ -3941,7 +3944,7 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
         }
         return;
       }
-      const res = await fetch('/v1/models', {
+      const res = await fetch('/v1/public/models', {
         cache: 'no-store',
         headers: buildAuthHeaders(authHeader)
       });

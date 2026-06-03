@@ -1,4 +1,7 @@
 (() => {
+  if (typeof window.requirePublicAccess === 'function') {
+    window.requirePublicAccess();
+  }
   const imagePromptInput = document.getElementById('imagePromptInput');
   const videoPromptInput = document.getElementById('videoPromptInput');
   const ratioSelect = document.getElementById('ratioSelect');

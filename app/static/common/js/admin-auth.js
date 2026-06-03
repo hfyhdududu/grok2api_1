@@ -210,6 +210,15 @@ async function ensurePublicKey() {
   }
 }
 
+async function requirePublicAccess() {
+  const authHeader = await ensurePublicKey();
+  if (authHeader === null) {
+    window.location.href = '/login';
+    return null;
+  }
+  return authHeader;
+}
+
 function buildAuthHeaders(apiKey) {
   return apiKey ? { 'Authorization': apiKey } : {};
 }

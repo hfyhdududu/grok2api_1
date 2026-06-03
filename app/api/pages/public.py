@@ -10,6 +10,12 @@ router = APIRouter()
 STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
 
 
+def _ensure_public_page_access():
+    if not is_public_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+    return None
+
+
 @router.get("/", include_in_schema=False)
 async def root():
     if is_public_enabled():
@@ -26,43 +32,49 @@ async def public_login():
 
 @router.get("/imagine", include_in_schema=False)
 async def public_imagine():
-    if not is_public_enabled():
-        raise HTTPException(status_code=404, detail="Not Found")
+    redirect = _ensure_public_page_access()
+    if redirect:
+        return redirect
     return serve_embedded_asset(STATIC_DIR, "public/pages/imagine.html", "text/html; charset=utf-8")
 
 
 @router.get("/voice", include_in_schema=False)
 async def public_voice():
-    if not is_public_enabled():
-        raise HTTPException(status_code=404, detail="Not Found")
+    redirect = _ensure_public_page_access()
+    if redirect:
+        return redirect
     return serve_embedded_asset(STATIC_DIR, "public/pages/voice.html", "text/html; charset=utf-8")
 
 
 @router.get("/video", include_in_schema=False)
 async def public_video():
-    if not is_public_enabled():
-        raise HTTPException(status_code=404, detail="Not Found")
+    redirect = _ensure_public_page_access()
+    if redirect:
+        return redirect
     return serve_embedded_asset(STATIC_DIR, "public/pages/video.html", "text/html; charset=utf-8")
 
 
 @router.get("/chat", include_in_schema=False)
 async def public_chat():
-    if not is_public_enabled():
-        raise HTTPException(status_code=404, detail="Not Found")
+    redirect = _ensure_public_page_access()
+    if redirect:
+        return redirect
     return serve_embedded_asset(STATIC_DIR, "public/pages/chat.html", "text/html; charset=utf-8")
 
 
 @router.get("/nsfw", include_in_schema=False)
 async def public_nsfw():
-    if not is_public_enabled():
-        raise HTTPException(status_code=404, detail="Not Found")
+    redirect = _ensure_public_page_access()
+    if redirect:
+        return redirect
     return serve_embedded_asset(STATIC_DIR, "public/pages/nsfw.html", "text/html; charset=utf-8")
 
 
 @router.get("/imagine-workbench", include_in_schema=False)
 async def public_imagine_workbench():
-    if not is_public_enabled():
-        raise HTTPException(status_code=404, detail="Not Found")
+    redirect = _ensure_public_page_access()
+    if redirect:
+        return redirect
     return serve_embedded_asset(STATIC_DIR, "public/pages/imagine_workbench.html", "text/html; charset=utf-8")
 
 
