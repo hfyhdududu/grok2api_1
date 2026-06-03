@@ -14,6 +14,7 @@ from app.services.token.models import (
     TokenStatus,
     BASIC__DEFAULT_QUOTA,
     SUPER_DEFAULT_QUOTA,
+    HEAVY_DEFAULT_QUOTA,
     default_quota_set,
 )
 from app.core.storage import get_storage, LocalStorage
@@ -27,6 +28,7 @@ from app.services.reverse.rate_limits import fetch_quota_windows
 DEFAULT_REFRESH_BATCH_SIZE = 10
 DEFAULT_REFRESH_CONCURRENCY = 5
 DEFAULT_SUPER_REFRESH_INTERVAL_HOURS = 2
+DEFAULT_HEAVY_REFRESH_INTERVAL_HOURS = 2
 DEFAULT_REFRESH_INTERVAL_HOURS = 8
 DEFAULT_RELOAD_INTERVAL_SEC = 30
 DEFAULT_SAVE_DELAY_MS = 500
@@ -43,6 +45,8 @@ POOL_MODE_KEYS = {
 
 
 def _default_quota_for_pool(pool_name: str) -> int:
+    if pool_name == HEAVY_POOL_NAME:
+        return HEAVY_DEFAULT_QUOTA
     if pool_name == SUPER_POOL_NAME:
         return SUPER_DEFAULT_QUOTA
     return BASIC__DEFAULT_QUOTA
@@ -64,6 +68,17 @@ def _token_tag(token: str) -> str:
     if len(raw) <= 14:
         return raw
     return f"{raw[:6]}...{raw[-6:]}"
+
+
+def _infer_pool_from_windows(windows: dict[str, dict]) -> str:
+    """根据 rate-limits 返回的 auto.total 推断账号档位。"""
+    auto_window = windows.get("auto") or {}
+    auto_total = int(auto_window.get("total") or 0)
+    if auto_total == 150:
+        return HEAVY_POOL_NAME
+    if auto_total == 50:
+        return SUPER_POOL_NAME
+    return BASIC_POOL_NAME
 
 
 class TokenManager:
@@ -492,6 +507,16 @@ class TokenManager:
             if not windows:
                 return False
 
+            inferred_pool_name = _infer_pool_from_windows(windows)
+            if inferred_pool_name != target_pool_name:
+                logger.info(
+                    f"Token {raw_token[:10]}...: pool inferred {target_pool_name} -> {inferred_pool_name}"
+                )
+                self.pools.setdefault(inferred_pool_name, TokenPool(inferred_pool_name))
+                self.pools[target_pool_name].remove(raw_token)
+                self.pools[inferred_pool_name].add(target_token)
+                target_pool_name = inferred_pool_name
+
             old_primary = target_token.primary_quota()
             sync_time = int(datetime.now().timestamp() * 1000)
             for mode_key, window in windows.items():
@@ -772,7 +797,12 @@ class TokenManager:
         # 收集需要刷新的 token
         to_refresh: List[TokenInfo] = []
         for pool in self.pools.values():
-            if pool.name == SUPER_POOL_NAME:
+            if pool.name == HEAVY_POOL_NAME:
+                interval_hours = get_config(
+                    "token.heavy_refresh_interval_hours",
+                    DEFAULT_HEAVY_REFRESH_INTERVAL_HOURS,
+                )
+            elif pool.name == SUPER_POOL_NAME:
                 interval_hours = get_config(
                     "token.super_refresh_interval_hours",
                     DEFAULT_SUPER_REFRESH_INTERVAL_HOURS,

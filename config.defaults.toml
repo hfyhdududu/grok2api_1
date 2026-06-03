@@ -82,6 +82,8 @@ auto_refresh = true
 refresh_interval_hours = 8
 # Super Token 刷新间隔（小时）
 super_refresh_interval_hours = 2
+# Heavy Token 刷新间隔（小时）
+heavy_refresh_interval_hours = 2
 # Token 连续失败阈值
 fail_threshold = 5
 # Token 变更保存延迟（毫秒）

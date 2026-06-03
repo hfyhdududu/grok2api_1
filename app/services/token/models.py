@@ -17,6 +17,7 @@ from datetime import datetime
 # 默认配额
 BASIC__DEFAULT_QUOTA = 80
 SUPER_DEFAULT_QUOTA = 140
+HEAVY_DEFAULT_QUOTA = 400
 
 # 失败阈值
 FAIL_THRESHOLD = 5
