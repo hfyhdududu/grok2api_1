@@ -2681,9 +2681,15 @@
     if (!sections.length) {
       return renderLiteBody(text, options);
     }
-    const renderThinkAgentSummary = (title) => {
+    const getThinkAgentBadge = (title, index) => {
+      const match = String(title || "").match(/Agent\s*(\d+)/i);
+      if (match) return match[1];
+      return String(index);
+    };
+    const renderThinkAgentSummary = (title, index) => {
       const safeTitle = escapeHtml(String(title || ""));
-      return `<summary><span class="think-agent-avatar" aria-hidden="true"></span><span class="think-agent-label">${safeTitle}</span></summary>`;
+      const safeBadge = escapeHtml(getThinkAgentBadge(title, index));
+      return `<span class="think-agent-trigger"><span class="think-agent-avatar" aria-hidden="true">${safeBadge}</span><span class="think-agent-label">${safeTitle}</span></span>`;
     };
     const renderGroups = (blocks) => {
       const groups = [];
@@ -2705,26 +2711,40 @@
         return `<details class="think-rollout-group"${openAttr}><summary><span class="think-rollout-title"><span class="think-rollout-avatar" aria-hidden="true"></span><span class="think-rollout-label">${title}</span></span></summary><div class="think-rollout-body">${items || "<em>\uFF08\u7A7A\uFF09</em>"}</div></details>`;
       }).join("");
     };
-    const agentBlocks = sections.map((section, index) => {
+    const renderAgentCard = (agent, index, isActive = false) => {
+      const activeAttr = isActive ? ' data-active="true"' : "";
+      const safeTitle = escapeHtml(agent.title);
+      const inner = agent.body || "<em>\uFF08\u7A7A\uFF09</em>";
+      return `<div class="think-agent" role="button" tabindex="0" data-agent-index="${index}" aria-label="${safeTitle}" title="${safeTitle}" style="--agent-order: ${index};"${activeAttr}>${renderThinkAgentSummary(agent.title, index)}<template class="think-agent-template">${inner}</template></div>`;
+    };
+    const agentItems = [];
+    sections.forEach((section) => {
       const blocks = parseRolloutBlocksLite(section.lines.join("\n"), section.title || "General");
       if (!section.title && blocks.length) {
         const syntheticAgents = splitBlocksIntoSyntheticAgentsLite(blocks);
         if (syntheticAgents.length) {
-          return syntheticAgents.map((agent, agentIndex) => {
-            const openAttr2 = openAll ? " open" : index === 0 && agentIndex === 0 ? " open" : "";
+          syntheticAgents.forEach((agent) => {
             const inner2 = renderThinkItemRowsLite(agent.blocks, options);
-            return `<details class="think-agent"${openAttr2}>${renderThinkAgentSummary(agent.title)}<div class="think-agent-items">${inner2}</div></details>`;
-          }).join("");
+            agentItems.push({ title: agent.title, body: inner2 });
+          });
+          return;
         }
       }
       const inner = blocks.length ? renderGroups(blocks) : `<div class="think-rollout-body">${renderLiteBody(section.lines.join("\n").trim(), options) || "<em>\uFF08\u7A7A\uFF09</em>"}</div>`;
       if (!section.title) {
-        return `<div class="think-agent-items">${inner}</div>`;
+        agentItems.push({ title: "Grok Leader", body: inner });
+        return;
       }
-      const openAttr = openAll ? " open" : index === 0 ? " open" : "";
-      return `<details class="think-agent"${openAttr}>${renderThinkAgentSummary(section.title)}<div class="think-agent-items">${inner}</div></details>`;
+      agentItems.push({ title: section.title, body: inner });
     });
-    return `<div class="think-agents">${agentBlocks.join("")}</div>`;
+    if (agentItems.length > 4) {
+      const visible = agentItems.slice(0, 4);
+      const hiddenCount = agentItems.length - visible.length;
+      const avatars = visible.map((agent, index) => `<span class="think-agent-stack-avatar" data-agent-index="${index}" title="${escapeHtml(agent.title)}" aria-hidden="true">${escapeHtml(getThinkAgentBadge(agent.title, index))}</span>`).join("");
+      const cards = agentItems.map((agent, index) => renderAgentCard(agent, index, false)).join("");
+      return `<div class="think-agent-stack"><button type="button" class="think-agent-stack-toggle" aria-label="\u5C55\u5F00\u4EE3\u7406\u601D\u8003"><span class="think-agent-stack-avatars">${avatars}<span class="think-agent-stack-more">+${hiddenCount}</span></span></button><div class="think-agents">${cards}</div><button type="button" class="think-agent-stack-label">\u4EE3\u7406\u601D\u8003</button></div>`;
+    }
+    return `<div class="think-agents">${agentItems.map((agent, index) => renderAgentCard(agent, index, false)).join("")}</div>`;
   }
   function renderLiteMarkdown(text, options = {}) {
     const source = String(text || "").replace(/\\n/g, "\n");
@@ -3558,6 +3578,17 @@
     let storageQueue = Promise.resolve();
     let storageFallbackMode = false;
     const attachmentObjectUrls = /* @__PURE__ */ new Map();
+    const sidebarHome = chatSidebar ? {
+      parent: chatSidebar.parentNode,
+      next: chatSidebar.nextSibling
+    } : null;
+    const sidebarOverlayHome = sidebarOverlay ? {
+      parent: sidebarOverlay.parentNode,
+      next: sidebarOverlay.nextSibling
+    } : null;
+    if (sidebarToggle && sidebarToggle.parentElement !== document.body) {
+      document.body.appendChild(sidebarToggle);
+    }
     function generateId() {
       return crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
     }
@@ -4293,6 +4324,31 @@
     function isMobileSidebar() {
       return window.matchMedia("(max-width: 1024px)").matches;
     }
+    function restoreElementHome(element, home) {
+      if (!element || !home || !home.parent) return;
+      if (element.parentNode === home.parent) return;
+      home.parent.insertBefore(element, home.next && home.next.parentNode === home.parent ? home.next : null);
+    }
+    function syncSidebarLayer() {
+      if (isMobileSidebar()) {
+        if (sidebarOverlay && sidebarOverlay.parentElement !== document.body) {
+          document.body.appendChild(sidebarOverlay);
+        }
+        if (chatSidebar && chatSidebar.parentElement !== document.body) {
+          document.body.appendChild(chatSidebar);
+        }
+        return;
+      }
+      if (chatSidebar) {
+        chatSidebar.classList.remove("open");
+      }
+      if (sidebarOverlay) {
+        sidebarOverlay.classList.remove("open");
+      }
+      document.body.classList.remove("sidebar-open");
+      restoreElementHome(chatSidebar, sidebarHome);
+      restoreElementHome(sidebarOverlay, sidebarOverlayHome);
+    }
     function setSidebarCollapsed(collapsed) {
       const layout2 = chatSidebar ? chatSidebar.closest(".chat-layout") : null;
       if (!layout2) return;
@@ -4303,22 +4359,29 @@
       }
     }
     function openSidebar() {
+      syncSidebarLayer();
       if (isMobileSidebar()) {
         if (chatSidebar) chatSidebar.classList.add("open");
         if (sidebarOverlay) sidebarOverlay.classList.add("open");
+        document.body.classList.add("sidebar-open");
         return;
       }
+      document.body.classList.remove("sidebar-open");
       setSidebarCollapsed(false);
     }
     function closeSidebar() {
+      syncSidebarLayer();
       if (isMobileSidebar()) {
         if (chatSidebar) chatSidebar.classList.remove("open");
         if (sidebarOverlay) sidebarOverlay.classList.remove("open");
+        document.body.classList.remove("sidebar-open");
         return;
       }
+      document.body.classList.remove("sidebar-open");
       setSidebarCollapsed(true);
     }
     function toggleSidebar() {
+      syncSidebarLayer();
       if (isMobileSidebar()) {
         if (chatSidebar && chatSidebar.classList.contains("open")) {
           closeSidebar();
@@ -4332,6 +4395,7 @@
       setSidebarCollapsed(!layout2.classList.contains("collapsed"));
     }
     function restoreSidebarState() {
+      syncSidebarLayer();
       try {
         const raw = localStorage.getItem(SIDEBAR_STATE_KEY);
         setSidebarCollapsed(raw === "1");
@@ -5406,9 +5470,15 @@ ${renderedAnswer}`.trim();
       if (!sections.length) {
         return renderBasicMarkdown(text, imageSourceMap);
       }
-      const renderThinkAgentSummary = (title) => {
+      const getThinkAgentBadge = (title, index) => {
+        const match = String(title || "").match(/Agent\s*(\d+)/i);
+        if (match) return match[1];
+        return String(index);
+      };
+      const renderThinkAgentSummary = (title, index) => {
         const safeTitle = escapeHtml2(title);
-        return `<summary><span class="think-agent-avatar" aria-hidden="true"></span><span class="think-agent-label">${safeTitle}</span></summary>`;
+        const safeBadge = escapeHtml2(getThinkAgentBadge(title, index));
+        return `<span class="think-agent-trigger"><span class="think-agent-avatar" aria-hidden="true">${safeBadge}</span><span class="think-agent-label">${safeTitle}</span></span>`;
       };
       const renderGroups = (blocks, openAllGroups) => {
         const groups = [];
@@ -5436,26 +5506,40 @@ ${renderedAnswer}`.trim();
           return `<details class="think-rollout-group"${openAttr}><summary><span class="think-rollout-title"><span class="think-rollout-avatar" aria-hidden="true"></span><span class="think-rollout-label">${title}</span></span></summary><div class="think-rollout-body">${items}</div></details>`;
         }).join("");
       };
-      const agentBlocks = sections.map((section, idx) => {
+      const renderAgentCard = (agent, index, isActive = false) => {
+        const activeAttr = isActive ? ' data-active="true"' : "";
+        const safeTitle = escapeHtml2(agent.title);
+        const inner = agent.body || "<em>\uFF08\u7A7A\uFF09</em>";
+        return `<div class="think-agent" role="button" tabindex="0" data-agent-index="${index}" aria-label="${safeTitle}" title="${safeTitle}" style="--agent-order: ${index};"${activeAttr}>${renderThinkAgentSummary(agent.title, index)}<template class="think-agent-template">${inner}</template></div>`;
+      };
+      const agentItems = [];
+      sections.forEach((section) => {
         const blocks = parseRolloutBlocks(section.lines.join("\n"), section.title || "General");
         if (!section.title && blocks.length) {
           const synthetic = splitBlocksIntoSyntheticAgents(blocks);
           if (synthetic.length) {
-            return synthetic.map((agent, agentIdx) => {
+            synthetic.forEach((agent) => {
               const inner2 = renderFlatBlocks(agent.blocks, imageSourceMap);
-              const openAttr2 = openAll ? " open" : idx === 0 && agentIdx === 0 ? " open" : "";
-              return `<details class="think-agent"${openAttr2}>${renderThinkAgentSummary(agent.title)}<div class="think-agent-items">${inner2}</div></details>`;
-            }).join("");
+              agentItems.push({ title: agent.title, body: inner2 });
+            });
+            return;
           }
         }
         const inner = blocks.length ? renderGroups(blocks, openAll) : `<div class="think-rollout-body">${renderBasicMarkdown(section.lines.join("\n").trim(), imageSourceMap)}</div>`;
         if (!section.title) {
-          return `<div class="think-agent-items">${inner}</div>`;
+          agentItems.push({ title: "Grok Leader", body: inner });
+          return;
         }
-        const openAttr = openAll ? " open" : idx === 0 ? " open" : "";
-        return `<details class="think-agent"${openAttr}>${renderThinkAgentSummary(section.title)}<div class="think-agent-items">${inner}</div></details>`;
+        agentItems.push({ title: section.title, body: inner });
       });
-      return `<div class="think-agents">${agentBlocks.join("")}</div>`;
+      if (agentItems.length > 4) {
+        const visible = agentItems.slice(0, 4);
+        const hiddenCount = agentItems.length - visible.length;
+        const avatars = visible.map((agent, index) => `<span class="think-agent-stack-avatar" data-agent-index="${index}" title="${escapeHtml2(agent.title)}" aria-hidden="true">${escapeHtml2(getThinkAgentBadge(agent.title, index))}</span>`).join("");
+        const cards = agentItems.map((agent, index) => renderAgentCard(agent, index, false)).join("");
+        return `<div class="think-agent-stack"><button type="button" class="think-agent-stack-toggle" aria-label="\u5C55\u5F00\u4EE3\u7406\u601D\u8003"><span class="think-agent-stack-avatars">${avatars}<span class="think-agent-stack-more">+${hiddenCount}</span></span></button><div class="think-agents">${cards}</div><button type="button" class="think-agent-stack-label">\u4EE3\u7406\u601D\u8003</button></div>`;
+      }
+      return `<div class="think-agents">${agentItems.map((agent, index) => renderAgentCard(agent, index, false)).join("")}</div>`;
     }
     function renderMarkdown(text, imageSourceMap = null) {
       const raw = text || "";
@@ -5549,6 +5633,24 @@ ${renderedAnswer}`.trim();
         }
       }
     }
+    function captureExpandedState(root, selector) {
+      if (!root || !root.querySelectorAll) return null;
+      const nodes = Array.from(root.querySelectorAll(selector));
+      if (!nodes.length) return null;
+      return nodes.map((node) => node.getAttribute("data-expanded") === "true");
+    }
+    function restoreExpandedState(root, selector, states) {
+      if (!root || !root.querySelectorAll || !Array.isArray(states) || !states.length) return;
+      const nodes = Array.from(root.querySelectorAll(selector));
+      const max = Math.min(nodes.length, states.length);
+      for (let i = 0; i < max; i += 1) {
+        if (states[i]) {
+          nodes[i].setAttribute("data-expanded", "true");
+        } else {
+          nodes[i].removeAttribute("data-expanded");
+        }
+      }
+    }
     function restoreScrollState(root, selector, states) {
       if (!root || !root.querySelectorAll || !Array.isArray(states) || !states.length) return;
       const nodes = Array.from(root.querySelectorAll(selector));
@@ -5605,10 +5707,9 @@ ${renderedAnswer}`.trim();
       const scrollContainer = shouldPreserveScroll ? getScrollContainer() : null;
       const viewportAnchor = shouldPreserveScroll ? fixedViewportAnchor || captureViewportAnchor(scrollContainer) : null;
       const savedThinkBlockState = captureOpenState(entry.contentNode, ".think-block");
-      const savedThinkAgentState = captureOpenState(entry.contentNode, ".think-agent");
+      const savedThinkAgentStackState = captureExpandedState(entry.contentNode, ".think-agent-stack");
       const savedRolloutState = captureOpenState(entry.contentNode, ".think-rollout-group");
       const savedThinkContentScroll = captureScrollState(entry.contentNode, ".think-content");
-      const savedThinkAgentItemsScroll = captureScrollState(entry.contentNode, ".think-agent-items");
       const savedThinkRolloutBodyScroll = captureScrollState(entry.contentNode, ".think-rollout-body");
       if (!entry.hasThink && entry.raw.includes("<think>")) {
         entry.hasThink = true;
@@ -5632,11 +5733,10 @@ ${renderedAnswer}`.trim();
         mediaItems
       });
       restoreOpenState(entry.contentNode, ".think-block", savedThinkBlockState);
-      restoreOpenState(entry.contentNode, ".think-agent", savedThinkAgentState);
+      restoreExpandedState(entry.contentNode, ".think-agent-stack", savedThinkAgentStackState);
       restoreOpenState(entry.contentNode, ".think-rollout-group", savedRolloutState);
       if (shouldPreserveScroll) {
         restoreScrollState(entry.contentNode, ".think-content", savedThinkContentScroll);
-        restoreScrollState(entry.contentNode, ".think-agent-items", savedThinkAgentItemsScroll);
         restoreScrollState(entry.contentNode, ".think-rollout-body", savedThinkRolloutBodyScroll);
       }
       if (entry.hasThink) {
@@ -6479,6 +6579,83 @@ ${renderedAnswer}`.trim();
         event.stopPropagation();
         expandInlineCitationCluster(target);
       });
+    }
+    function closeThinkAgentPopover() {
+      const popover = document.querySelector(".think-agent-popover");
+      if (popover) {
+        popover.setAttribute("data-closing", "true");
+        setTimeout(() => {
+          if (popover.isConnected) {
+            popover.remove();
+          }
+        }, 180);
+      }
+      document.querySelectorAll('.think-agent[data-active="true"]').forEach((agent) => {
+        agent.removeAttribute("data-active");
+      });
+    }
+    function positionThinkAgentPopover(popover, agent) {
+      if (!popover || !agent) return;
+      const rect = agent.getBoundingClientRect();
+      const margin = 12;
+      const width = Math.min(620, Math.max(320, window.innerWidth - margin * 2));
+      const left = Math.min(Math.max(margin, rect.left), window.innerWidth - width - margin);
+      const belowTop = rect.bottom + 10;
+      const maxHeight = Math.min(520, Math.max(220, window.innerHeight - belowTop - margin));
+      popover.style.width = `${width}px`;
+      popover.style.left = `${left}px`;
+      popover.style.top = `${belowTop}px`;
+      popover.style.maxHeight = `${maxHeight}px`;
+      popover.style.setProperty("--popover-origin-x", `${Math.min(Math.max(rect.left + rect.width / 2 - left, 24), width - 24)}px`);
+      popover.style.setProperty("--popover-origin-y", "0px");
+    }
+    function openThinkAgentPopover(agent) {
+      if (!(agent instanceof HTMLElement)) return;
+      const template = agent.querySelector(".think-agent-template");
+      const html = template ? template.innerHTML : "";
+      const label = agent.querySelector(".think-agent-label");
+      const title = label ? label.textContent || "" : "";
+      closeThinkAgentPopover();
+      agent.setAttribute("data-active", "true");
+      const popover = document.createElement("div");
+      popover.className = "think-agent-popover";
+      popover.innerHTML = `<div class="think-agent-popover-header"><span class="think-agent-avatar" aria-hidden="true"></span><span class="think-agent-label">${escapeHtml2(title)}</span></div><div class="think-agent-popover-body">${html || "<em>\uFF08\u7A7A\uFF09</em>"}</div>`;
+      document.body.appendChild(popover);
+      positionThinkAgentPopover(popover, agent);
+      requestAnimationFrame(() => {
+        popover.setAttribute("data-ready", "true");
+      });
+    }
+    let thinkAgentDrag = null;
+    function startThinkAgentsDrag(scroller, event) {
+      if (!(scroller instanceof HTMLElement)) return;
+      thinkAgentDrag = {
+        scroller,
+        x: event.clientX,
+        scrollLeft: scroller.scrollLeft,
+        moved: false
+      };
+      scroller.classList.add("is-dragging");
+    }
+    function moveThinkAgentsDrag(event) {
+      if (!thinkAgentDrag) return;
+      const delta = event.clientX - thinkAgentDrag.x;
+      if (Math.abs(delta) > 3) {
+        thinkAgentDrag.moved = true;
+        thinkAgentDrag.scroller.dataset.dragging = "1";
+      }
+      thinkAgentDrag.scroller.scrollLeft = thinkAgentDrag.scrollLeft - delta;
+    }
+    function endThinkAgentsDrag() {
+      if (!thinkAgentDrag) return;
+      const scroller = thinkAgentDrag.scroller;
+      scroller.classList.remove("is-dragging");
+      setTimeout(() => {
+        if (scroller.dataset.dragging === "1") {
+          delete scroller.dataset.dragging;
+        }
+      }, 0);
+      thinkAgentDrag = null;
     }
     function cleanExtractedUrl(url) {
       return String(url || "").trim().replace(/[),.;]+$/g, "");
@@ -7731,6 +7908,43 @@ ${renderedAnswer}`.trim();
         });
       }
       document.addEventListener("click", (event) => {
+        const eventTarget = event.target instanceof Element ? event.target : null;
+        const agentButton = eventTarget ? eventTarget.closest(".think-agent") : null;
+        const stackToggle = eventTarget ? eventTarget.closest(".think-agent-stack-toggle, .think-agent-stack-label") : null;
+        const agentPopover = eventTarget ? eventTarget.closest(".think-agent-popover") : null;
+        if (stackToggle) {
+          event.preventDefault();
+          event.stopPropagation();
+          const stack = stackToggle.closest(".think-agent-stack");
+          if (stack) {
+            const expanded = stack.getAttribute("data-expanded") === "true";
+            if (expanded) {
+              stack.removeAttribute("data-expanded");
+            } else {
+              stack.setAttribute("data-expanded", "true");
+            }
+          }
+          return;
+        }
+        if (agentButton) {
+          const scroller = agentButton.closest(".think-agents");
+          if (scroller && scroller.dataset.dragging === "1") {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          if (agentButton.getAttribute("data-active") === "true") {
+            closeThinkAgentPopover();
+          } else {
+            openThinkAgentPopover(agentButton);
+          }
+          return;
+        }
+        if (!agentPopover) {
+          closeThinkAgentPopover();
+        }
         if (modelPicker && !modelPicker.contains(event.target)) {
           closeModelPicker();
         }
@@ -7741,8 +7955,30 @@ ${renderedAnswer}`.trim();
         toggleSettings(false);
       });
       window.addEventListener("resize", () => {
+        syncSidebarLayer();
+        closeThinkAgentPopover();
         if (modelPicker && modelPicker.classList.contains("open")) {
           positionModelPickerMenu();
+        }
+      });
+      document.addEventListener("pointerdown", (event) => {
+        const eventTarget = event.target instanceof Element ? event.target : null;
+        const scroller = eventTarget ? eventTarget.closest(".think-agents") : null;
+        if (scroller) {
+          startThinkAgentsDrag(scroller, event);
+        }
+      });
+      document.addEventListener("pointermove", moveThinkAgentsDrag);
+      document.addEventListener("pointerup", endThinkAgentsDrag);
+      document.addEventListener("pointercancel", endThinkAgentsDrag);
+      document.addEventListener("keydown", (event) => {
+        const agent = event.target instanceof Element ? event.target.closest(".think-agent") : null;
+        if (!agent || event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        if (agent.getAttribute("data-active") === "true") {
+          closeThinkAgentPopover();
+        } else {
+          openThinkAgentPopover(agent);
         }
       });
       if (promptInput) {
@@ -7933,6 +8169,7 @@ ${renderedAnswer}`.trim();
     updateRangeValues();
     setSendingState(false);
     bindEvents();
+    syncSidebarLayer();
     restoreSidebarState();
     loadSessions();
     loadModels();

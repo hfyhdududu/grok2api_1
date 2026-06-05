@@ -40,9 +40,20 @@ describe('renderLiteMarkdown', () => {
     const html = renderLiteMarkdown('<think>\\n[Agent 1][WebSearch] Tesla Model Y\\nbrowse_page {"url":"https://example.com"}\\n[Agent 2][SearchImage] Tesla Model Y exterior\\n');
     expect(html).toContain('class="think-agents"');
     expect(html).toContain('class="think-agent"');
-    expect(html).toContain('class="think-agent-items"');
+    expect(html).toContain('class="think-agent-template"');
     expect(html).toContain('class="think-item-row"');
     expect(html).toContain('browse_page');
+  });
+
+  it('超过 4 个 agent 时先显示折叠入口', () => {
+    const blocks = Array.from({ length: 16 }, (_, index) => `[Agent ${index + 1}][AgentThink] step ${index + 1}`).join('\\n');
+    const html = renderLiteMarkdown(`<think>\\n${blocks}\\n`);
+    expect(html).toContain('class="think-agent-stack"');
+    expect(html).toContain('class="think-agent-stack-more">+12</span>');
+    expect(html).toContain('class="think-agents"');
+    expect(html).toContain('class="think-agent-template"');
+    expect(html).not.toContain('class="think-agent" open');
+    expect(html).not.toContain('<details class="think-agent-stack"');
   });
 
   it('轻量渲染支持 markdown 图片语法', () => {

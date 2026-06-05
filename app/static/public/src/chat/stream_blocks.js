@@ -262,9 +262,16 @@ function renderThinkLiteContent(text, openAll, options = {}) {
     return renderLiteBody(text, options);
   }
 
-  const renderThinkAgentSummary = (title) => {
+  const getThinkAgentBadge = (title, index) => {
+    const match = String(title || '').match(/Agent\s*(\d+)/i);
+    if (match) return match[1];
+    return String(index);
+  };
+
+  const renderThinkAgentSummary = (title, index) => {
     const safeTitle = escapeHtml(String(title || ''));
-    return `<summary><span class="think-agent-avatar" aria-hidden="true"></span><span class="think-agent-label">${safeTitle}</span></summary>`;
+    const safeBadge = escapeHtml(getThinkAgentBadge(title, index));
+    return `<span class="think-agent-trigger"><span class="think-agent-avatar" aria-hidden="true">${safeBadge}</span><span class="think-agent-label">${safeTitle}</span></span>`;
   };
 
   const renderGroups = (blocks) => {
@@ -289,16 +296,24 @@ function renderThinkLiteContent(text, openAll, options = {}) {
     }).join('');
   };
 
-  const agentBlocks = sections.map((section, index) => {
+  const renderAgentCard = (agent, index, isActive = false) => {
+    const activeAttr = isActive ? ' data-active="true"' : '';
+    const safeTitle = escapeHtml(agent.title);
+    const inner = agent.body || '<em>（空）</em>';
+    return `<div class="think-agent" role="button" tabindex="0" data-agent-index="${index}" aria-label="${safeTitle}" title="${safeTitle}" style="--agent-order: ${index};"${activeAttr}>${renderThinkAgentSummary(agent.title, index)}<template class="think-agent-template">${inner}</template></div>`;
+  };
+
+  const agentItems = [];
+  sections.forEach((section) => {
     const blocks = parseRolloutBlocksLite(section.lines.join('\n'), section.title || 'General');
     if (!section.title && blocks.length) {
       const syntheticAgents = splitBlocksIntoSyntheticAgentsLite(blocks);
       if (syntheticAgents.length) {
-        return syntheticAgents.map((agent, agentIndex) => {
-          const openAttr = openAll ? ' open' : (index === 0 && agentIndex === 0 ? ' open' : '');
+        syntheticAgents.forEach((agent) => {
           const inner = renderThinkItemRowsLite(agent.blocks, options);
-          return `<details class="think-agent"${openAttr}>${renderThinkAgentSummary(agent.title)}<div class="think-agent-items">${inner}</div></details>`;
-        }).join('');
+          agentItems.push({ title: agent.title, body: inner });
+        });
+        return;
       }
     }
 
@@ -306,13 +321,23 @@ function renderThinkLiteContent(text, openAll, options = {}) {
       ? renderGroups(blocks)
       : `<div class="think-rollout-body">${renderLiteBody(section.lines.join('\n').trim(), options) || '<em>（空）</em>'}</div>`;
     if (!section.title) {
-      return `<div class="think-agent-items">${inner}</div>`;
+      agentItems.push({ title: 'Grok Leader', body: inner });
+      return;
     }
-    const openAttr = openAll ? ' open' : (index === 0 ? ' open' : '');
-    return `<details class="think-agent"${openAttr}>${renderThinkAgentSummary(section.title)}<div class="think-agent-items">${inner}</div></details>`;
+    agentItems.push({ title: section.title, body: inner });
   });
 
-  return `<div class="think-agents">${agentBlocks.join('')}</div>`;
+  if (agentItems.length > 4) {
+    const visible = agentItems.slice(0, 4);
+    const hiddenCount = agentItems.length - visible.length;
+    const avatars = visible
+      .map((agent, index) => `<span class="think-agent-stack-avatar" data-agent-index="${index}" title="${escapeHtml(agent.title)}" aria-hidden="true">${escapeHtml(getThinkAgentBadge(agent.title, index))}</span>`)
+      .join('');
+    const cards = agentItems.map((agent, index) => renderAgentCard(agent, index, false)).join('');
+    return `<div class="think-agent-stack"><button type="button" class="think-agent-stack-toggle" aria-label="展开代理思考"><span class="think-agent-stack-avatars">${avatars}<span class="think-agent-stack-more">+${hiddenCount}</span></span></button><div class="think-agents">${cards}</div><button type="button" class="think-agent-stack-label">代理思考</button></div>`;
+  }
+
+  return `<div class="think-agents">${agentItems.map((agent, index) => renderAgentCard(agent, index, false)).join('')}</div>`;
 }
 
 export function renderLiteMarkdown(text, options = {}) {
