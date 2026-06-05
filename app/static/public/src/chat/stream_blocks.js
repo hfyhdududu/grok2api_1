@@ -271,7 +271,7 @@ function renderThinkLiteContent(text, openAll, options = {}) {
   const renderThinkAgentSummary = (title, index) => {
     const safeTitle = escapeHtml(String(title || ''));
     const safeBadge = escapeHtml(getThinkAgentBadge(title, index));
-    return `<span class="think-agent-trigger"><span class="think-agent-avatar" aria-hidden="true">${safeBadge}</span><span class="think-agent-label">${safeTitle}</span></span>`;
+    return `<span class="think-agent-trigger"><span class="think-agent-avatar" aria-hidden="true"><span class="think-agent-number">${safeBadge}</span></span><span class="think-agent-label">${safeTitle}</span></span>`;
   };
 
   const renderGroups = (blocks) => {
@@ -331,7 +331,7 @@ function renderThinkLiteContent(text, openAll, options = {}) {
     const visible = agentItems.slice(0, 4);
     const hiddenCount = agentItems.length - visible.length;
     const avatars = visible
-      .map((agent, index) => `<span class="think-agent-stack-avatar" data-agent-index="${index}" title="${escapeHtml(agent.title)}" aria-hidden="true">${escapeHtml(getThinkAgentBadge(agent.title, index))}</span>`)
+      .map((agent, index) => `<span class="think-agent-stack-avatar" data-agent-index="${index}" title="${escapeHtml(agent.title)}" aria-hidden="true"><span class="think-agent-number">${escapeHtml(getThinkAgentBadge(agent.title, index))}</span></span>`)
       .join('');
     const cards = agentItems.map((agent, index) => renderAgentCard(agent, index, false)).join('');
     return `<div class="think-agent-stack"><button type="button" class="think-agent-stack-toggle" aria-label="展开代理思考"><span class="think-agent-stack-avatars">${avatars}<span class="think-agent-stack-more">+${hiddenCount}</span></span></button><div class="think-agents">${cards}</div><button type="button" class="think-agent-stack-label">代理思考</button></div>`;

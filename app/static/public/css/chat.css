@@ -929,6 +929,7 @@ html[data-theme='dark'] .user-image-placeholder__text {
   max-height: 0;
   opacity: 0;
   overflow: hidden;
+  overflow-x: clip;
   transition: max-height 0.25s ease, opacity 0.25s ease;
 }
 
@@ -1107,12 +1108,11 @@ html[data-theme='dark'] .user-image-placeholder__text {
   width: 100%;
   max-width: 100%;
   overflow-x: auto;
-  overflow-y: visible;
+  overflow-y: hidden;
   overscroll-behavior-x: contain;
   scroll-snap-type: x proximity;
   -webkit-overflow-scrolling: touch;
-  padding: 8px 14px 10px 8px;
-  margin: -8px -8px -10px -8px;
+  padding: 8px 14px 8px 8px;
   cursor: grab;
   touch-action: pan-x pan-y;
   scrollbar-width: none;
@@ -1170,11 +1170,13 @@ html[data-theme='dark'] .user-image-placeholder__text {
 
 .think-agent-stack-avatar,
 .think-agent-stack-more {
+  --agent-avatar-bg: conic-gradient(from 180deg, #f59e0b, #f97316, #22c55e, #0ea5e9, #f59e0b);
+  position: relative;
   width: 22px;
   height: 22px;
   border: 2px solid var(--chat-surface);
   border-radius: 999px;
-  background: conic-gradient(from 180deg, #f59e0b, #f97316, #22c55e, #0ea5e9, #f59e0b);
+  background: var(--agent-avatar-bg);
   box-shadow: 0 2px 8px rgba(17, 17, 17, 0.12);
   flex: 0 0 auto;
   display: inline-flex;
@@ -1188,7 +1190,28 @@ html[data-theme='dark'] .user-image-placeholder__text {
   transition:
     margin-left 0.38s cubic-bezier(.22, 1, .36, 1),
     transform 0.22s ease,
-    opacity 0.22s ease;
+  opacity 0.22s ease;
+}
+
+.think-agent-stack-avatar {
+  overflow: hidden;
+}
+
+.think-agent-stack-avatar::before,
+.think-agent-avatar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--agent-avatar-bg);
+}
+
+.think-agent-number {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .think-agent-stack-avatar + .think-agent-stack-avatar,
@@ -1230,9 +1253,8 @@ html[data-theme='dark'] .user-image-placeholder__text {
   max-width: 0;
   opacity: 0;
   overflow-x: hidden;
-  overflow-y: visible;
-  padding: 8px 0 10px 0;
-  margin: -8px 0 -10px 0;
+  overflow-y: hidden;
+  padding: 8px 0;
   transform: translateX(-14px);
   transition:
     max-width 0.42s cubic-bezier(.22, 1, .36, 1),
@@ -1252,9 +1274,8 @@ html[data-theme='dark'] .user-image-placeholder__text {
   max-width: calc(100% - 72px);
   opacity: 1;
   overflow-x: auto;
-  overflow-y: visible;
-  padding: 8px 14px 10px 8px;
-  margin: -8px -8px -10px -8px;
+  overflow-y: hidden;
+  padding: 8px 14px 8px 8px;
   transform: translateX(0);
   mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 28px), transparent 100%);
   -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 28px), transparent 100%);
@@ -1314,6 +1335,8 @@ html[data-theme='dark'] .user-image-placeholder__text {
 }
 
 .think-agent-avatar {
+  --agent-avatar-bg: conic-gradient(from 180deg, #f59e0b, #f97316, #22c55e, #0ea5e9, #f59e0b);
+  position: relative;
   width: 30px;
   height: 30px;
   display: inline-flex;
@@ -1321,7 +1344,7 @@ html[data-theme='dark'] .user-image-placeholder__text {
   justify-content: center;
   flex: 0 0 30px;
   border-radius: 50%;
-  background: conic-gradient(from 180deg, #f59e0b, #f97316, #22c55e, #0ea5e9, #f59e0b);
+  background: transparent;
   border: 1px solid #fff;
   box-shadow: 0 2px 8px rgba(17, 17, 17, 0.15);
   color: #fff;
@@ -1329,6 +1352,7 @@ html[data-theme='dark'] .user-image-placeholder__text {
   font-weight: 800;
   line-height: 1;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
   transition:
     transform 0.22s cubic-bezier(.22, 1, .36, 1),
     box-shadow 0.22s ease,
@@ -1377,17 +1401,17 @@ html[data-theme='dark'] .user-image-placeholder__text {
 
 .think-agent[data-agent-index="1"] .think-agent-avatar,
 .think-agent-stack-avatar[data-agent-index="1"] {
-  background: conic-gradient(from 180deg, #0ea5e9, #22c55e, #a855f7, #f97316, #0ea5e9);
+  --agent-avatar-bg: conic-gradient(from 180deg, #0ea5e9, #22c55e, #a855f7, #f97316, #0ea5e9);
 }
 
 .think-agent[data-agent-index="2"] .think-agent-avatar,
 .think-agent-stack-avatar[data-agent-index="2"] {
-  background: conic-gradient(from 180deg, #ec4899, #f59e0b, #14b8a6, #6366f1, #ec4899);
+  --agent-avatar-bg: conic-gradient(from 180deg, #ec4899, #f59e0b, #14b8a6, #6366f1, #ec4899);
 }
 
 .think-agent[data-agent-index="3"] .think-agent-avatar,
 .think-agent-stack-avatar[data-agent-index="3"] {
-  background: conic-gradient(from 180deg, #84cc16, #06b6d4, #f43f5e, #8b5cf6, #84cc16);
+  --agent-avatar-bg: conic-gradient(from 180deg, #84cc16, #06b6d4, #f43f5e, #8b5cf6, #84cc16);
 }
 
 .think-agent .think-agent-label {
@@ -1423,6 +1447,10 @@ html[data-theme='dark'] .user-image-placeholder__text {
 
 .think-block[data-thinking="true"] .think-agent-trigger {
   animation: thinkGlow 1.4s ease-in-out infinite;
+}
+
+.think-block[data-thinking="true"] .think-agent-avatar::before {
+  animation: thinkSpinSlow 2.2s linear infinite;
 }
 
 .think-block[data-thinking="true"] .think-agent-stack-toggle {

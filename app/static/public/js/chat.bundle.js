@@ -2689,7 +2689,7 @@
     const renderThinkAgentSummary = (title, index) => {
       const safeTitle = escapeHtml(String(title || ""));
       const safeBadge = escapeHtml(getThinkAgentBadge(title, index));
-      return `<span class="think-agent-trigger"><span class="think-agent-avatar" aria-hidden="true">${safeBadge}</span><span class="think-agent-label">${safeTitle}</span></span>`;
+      return `<span class="think-agent-trigger"><span class="think-agent-avatar" aria-hidden="true"><span class="think-agent-number">${safeBadge}</span></span><span class="think-agent-label">${safeTitle}</span></span>`;
     };
     const renderGroups = (blocks) => {
       const groups = [];
@@ -2740,7 +2740,7 @@
     if (agentItems.length > 4) {
       const visible = agentItems.slice(0, 4);
       const hiddenCount = agentItems.length - visible.length;
-      const avatars = visible.map((agent, index) => `<span class="think-agent-stack-avatar" data-agent-index="${index}" title="${escapeHtml(agent.title)}" aria-hidden="true">${escapeHtml(getThinkAgentBadge(agent.title, index))}</span>`).join("");
+      const avatars = visible.map((agent, index) => `<span class="think-agent-stack-avatar" data-agent-index="${index}" title="${escapeHtml(agent.title)}" aria-hidden="true"><span class="think-agent-number">${escapeHtml(getThinkAgentBadge(agent.title, index))}</span></span>`).join("");
       const cards = agentItems.map((agent, index) => renderAgentCard(agent, index, false)).join("");
       return `<div class="think-agent-stack"><button type="button" class="think-agent-stack-toggle" aria-label="\u5C55\u5F00\u4EE3\u7406\u601D\u8003"><span class="think-agent-stack-avatars">${avatars}<span class="think-agent-stack-more">+${hiddenCount}</span></span></button><div class="think-agents">${cards}</div><button type="button" class="think-agent-stack-label">\u4EE3\u7406\u601D\u8003</button></div>`;
     }
@@ -5478,7 +5478,7 @@ ${renderedAnswer}`.trim();
       const renderThinkAgentSummary = (title, index) => {
         const safeTitle = escapeHtml2(title);
         const safeBadge = escapeHtml2(getThinkAgentBadge(title, index));
-        return `<span class="think-agent-trigger"><span class="think-agent-avatar" aria-hidden="true">${safeBadge}</span><span class="think-agent-label">${safeTitle}</span></span>`;
+        return `<span class="think-agent-trigger"><span class="think-agent-avatar" aria-hidden="true"><span class="think-agent-number">${safeBadge}</span></span><span class="think-agent-label">${safeTitle}</span></span>`;
       };
       const renderGroups = (blocks, openAllGroups) => {
         const groups = [];
@@ -5535,7 +5535,7 @@ ${renderedAnswer}`.trim();
       if (agentItems.length > 4) {
         const visible = agentItems.slice(0, 4);
         const hiddenCount = agentItems.length - visible.length;
-        const avatars = visible.map((agent, index) => `<span class="think-agent-stack-avatar" data-agent-index="${index}" title="${escapeHtml2(agent.title)}" aria-hidden="true">${escapeHtml2(getThinkAgentBadge(agent.title, index))}</span>`).join("");
+        const avatars = visible.map((agent, index) => `<span class="think-agent-stack-avatar" data-agent-index="${index}" title="${escapeHtml2(agent.title)}" aria-hidden="true"><span class="think-agent-number">${escapeHtml2(getThinkAgentBadge(agent.title, index))}</span></span>`).join("");
         const cards = agentItems.map((agent, index) => renderAgentCard(agent, index, false)).join("");
         return `<div class="think-agent-stack"><button type="button" class="think-agent-stack-toggle" aria-label="\u5C55\u5F00\u4EE3\u7406\u601D\u8003"><span class="think-agent-stack-avatars">${avatars}<span class="think-agent-stack-more">+${hiddenCount}</span></span></button><div class="think-agents">${cards}</div><button type="button" class="think-agent-stack-label">\u4EE3\u7406\u601D\u8003</button></div>`;
       }
@@ -6447,14 +6447,14 @@ ${renderedAnswer}`.trim();
         if (!block) return;
         if (!entry.thinkingActive) {
           block.removeAttribute("data-thinking");
-          node.style.removeProperty("--think-spin-delay");
+          block.style.removeProperty("--think-spin-delay");
           activeThinkSpinEntries.delete(entry);
           block.querySelectorAll(".think-agent-avatar, .think-rollout-avatar").forEach((avatar) => {
             avatar.style.removeProperty("transform");
           });
         } else {
           block.setAttribute("data-thinking", "true");
-          node.style.setProperty("--think-spin-delay", spinOffset);
+          block.style.setProperty("--think-spin-delay", spinOffset);
           activeThinkSpinEntries.add(entry);
           ensureThinkSpinLoop();
         }
@@ -6473,8 +6473,9 @@ ${renderedAnswer}`.trim();
           }
           const elapsedMs = Math.max(0, now - (entry.startedAt || now));
           const angle = elapsedMs % 2200 / 2200 * 360;
-          entry.contentNode.querySelectorAll('.think-block[data-thinking="true"] .think-agent-avatar, .think-block[data-thinking="true"] .think-rollout-avatar').forEach((avatar) => {
-            avatar.style.transform = `rotate(${angle}deg)`;
+          entry.contentNode.querySelectorAll('.think-block[data-thinking="true"] .think-rollout-avatar').forEach((avatar) => {
+            const rotate = `${angle}deg`;
+            avatar.style.transform = `rotate(${rotate})`;
           });
         });
         if (activeThinkSpinEntries.size) {
