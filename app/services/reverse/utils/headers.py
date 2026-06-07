@@ -86,26 +86,21 @@ def build_sso_cookie(sso_token: str) -> str:
         field_name="proxy.cf_clearance",
         remove_all_spaces=True,
     )
-    cf_refresh_enabled = bool(get_config("proxy.enabled"))
-
-    if cf_refresh_enabled:
-        if not cf_cookies and cf_clearance:
-            cf_cookies = f"cf_clearance={cf_clearance}"
-    elif cf_clearance:
-        if cf_cookies:
-            # Replace existing cf_clearance or append if missing.
-            if re.search(r"(?:^|;\\s*)cf_clearance=", cf_cookies):
-                cf_cookies = re.sub(
-                    r"(^|;\\s*)cf_clearance=[^;]*",
-                    r"\\1cf_clearance=" + cf_clearance,
-                    cf_cookies,
-                    count=1,
-                )
-            else:
-                cf_cookies = cf_cookies.rstrip("; ")
-                cf_cookies = f"{cf_cookies}; cf_clearance={cf_clearance}"
+    # 与上游一致：只要配置里存在 cf_clearance，就强制合并进 Cookie，
+    # 避免 proxy.enabled=true 时只发送旧 cf_cookies 而忽略最新 clearance。
+    if cf_clearance and cf_cookies:
+        if re.search(r"(?:^|;\s*)cf_clearance=", cf_cookies):
+            cf_cookies = re.sub(
+                r"(^|;\s*)cf_clearance=[^;]*",
+                r"\1cf_clearance=" + cf_clearance,
+                cf_cookies,
+                count=1,
+            )
         else:
-            cf_cookies = f"cf_clearance={cf_clearance}"
+            cf_cookies = cf_cookies.rstrip("; ")
+            cf_cookies = f"{cf_cookies}; cf_clearance={cf_clearance}"
+    elif cf_clearance:
+        cf_cookies = f"cf_clearance={cf_clearance}"
     if cf_cookies:
         if cookie and not cookie.endswith(";"):
             cookie += "; "

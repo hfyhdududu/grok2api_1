@@ -352,7 +352,7 @@ class AppChatReverse:
             )
             # curl_cffi 支持 (connect_timeout, read_timeout)；流读取阶段仍由上层 idle timeout 控制。
             timeout = (connect_timeout, base_timeout)
-            browser = get_config("proxy.browser") or "chrome124"
+            browser = get_config("proxy.browser") or "chrome136"
 
             async def _post_once(request_headers: Dict[str, str]):
                 try:

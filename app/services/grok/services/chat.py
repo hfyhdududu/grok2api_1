@@ -863,7 +863,7 @@ class GrokChatService:
             f"attachments={len(file_attachments or [])}"
         )
 
-        browser = get_config("proxy.browser") or "chrome124"
+        browser = get_config("proxy.browser") or "chrome136"
         upstream_mode = _chat_upstream_mode()
 
         browser_payload = AppChatReverse.build_payload(

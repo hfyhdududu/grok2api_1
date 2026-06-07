@@ -47,13 +47,31 @@ def bridge_chat_first() -> bool:
     )
 
 
-def _bridge_timeout() -> float:
+def _bridge_chat_timeout() -> float:
+    """浏览器真实对话链路超时，需与首包超时策略对齐。"""
     try:
         configured = float(get_config("cloakbrowser.timeout", 120) or 120)
         first_token_timeout = float(get_config("chat.first_token_timeout", 20) or 20)
         return max(min(configured, first_token_timeout + 10), 1.0)
     except Exception:
         return 30.0
+
+
+def _bridge_probe_timeout() -> float:
+    """probe / session 抓取允许更长时间，避免页面自动化未完成就被 Python 侧断开。"""
+    try:
+        configured = float(get_config("cloakbrowser.timeout", 120) or 120)
+        nav_ms = float(get_config("cloakbrowser.nav_timeout_ms", 45000) or 45000)
+        ready_ms = float(get_config("cloakbrowser.ready_timeout_ms", 30000) or 30000)
+        page_budget = (nav_ms + ready_ms) / 1000.0 + 15.0
+        return max(configured, page_budget, 90.0)
+    except Exception:
+        return 120.0
+
+
+def _bridge_timeout() -> float:
+    """兼容旧调用：默认仍指对话链路超时。"""
+    return _bridge_chat_timeout()
 
 
 def _extract_raw_sso(token: str) -> str:
@@ -169,7 +187,7 @@ def _session_request_sync(sso: str = "") -> Dict[str, Any]:
     suffix = f"?sso={quote(sso)}" if sso else ""
     req = urllib_request.Request(f"{_bridge_base_url()}/api/session{suffix}", method="GET")
     try:
-        with urllib_request.urlopen(req, timeout=_bridge_timeout()) as resp:
+        with urllib_request.urlopen(req, timeout=_bridge_probe_timeout()) as resp:
             payload_text = resp.read().decode("utf-8", errors="replace")
             data = json.loads(payload_text) if payload_text else {}
             return data if isinstance(data, dict) else {}
@@ -206,7 +224,7 @@ def _probe_request_sync(sso: str = "", force: bool = False) -> Dict[str, Any]:
         method="POST",
     )
     try:
-        with urllib_request.urlopen(req, timeout=_bridge_timeout()) as resp:
+        with urllib_request.urlopen(req, timeout=_bridge_probe_timeout()) as resp:
             payload_text = resp.read().decode("utf-8", errors="replace")
             data = json.loads(payload_text) if payload_text else {}
             return data if isinstance(data, dict) else {}

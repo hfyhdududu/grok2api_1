@@ -424,6 +424,27 @@ async function navigateToUsableChat(page, label) {
   }
 }
 
+
+async function prepareUsableChat(page, label, options = {}) {
+  const skipInitialGoto = options.skipInitialGoto === true;
+  if (skipInitialGoto) {
+    await dismissCookieBanner(page).catch(() => {});
+    const quickInput = page.locator("textarea, [contenteditable='true']").first();
+    if (await quickInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+      log(`${label}: reusing prepared Grok home page, skip second goto`);
+      try {
+        await quickInput.waitFor({ state: "visible", timeout: READY_TIMEOUT });
+        return quickInput;
+      } catch (error) {
+        log(`${label}: prepared page input wait failed, fallback to full navigation`);
+      }
+    } else {
+      log(`${label}: prepared page has no visible chat input, fallback to full navigation`);
+    }
+  }
+  return navigateToUsableChat(page, label);
+}
+
 async function refreshSessionSnapshot(slot) {
   const { page, context } = slot;
   const cookies = await context.cookies("https://grok.com");
@@ -741,7 +762,7 @@ async function probeAppChatHeaders(slot, force = false) {
   }
 
   const { page } = slot;
-  const input = await navigateToUsableChat(page, "probe");
+  const input = await prepareUsableChat(page, "probe", { skipInitialGoto: true });
   await enableTemporaryMode(page, true);
   slot.probePageInfo = await page
     .evaluate(() => ({
