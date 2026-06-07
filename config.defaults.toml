@@ -192,6 +192,12 @@ session_cookies_json = ""
 probe_consume_upstream = false
 # Node 可执行文件
 node_binary = "node"
+# 启动 bridge 前是否自动执行 npm install 与 playwright install chromium
+auto_install_bridge_deps = true
+# npm / playwright 安装超时（秒）
+deps_install_timeout = 600
+# Linux 下是否尝试 playwright install-deps（通常需 root，默认关闭）
+auto_install_system_deps = false
 # CloakBrowser/Chromium 可执行文件路径，留空则由 Playwright 默认解析
 executable_path = ""
 # 浏览器用户数据目录

@@ -15,6 +15,7 @@ from urllib import request as urllib_request
 
 from app.core.config import get_config
 from app.core.logger import logger
+from .deps import ensure_bridge_dependencies
 
 BASE_DIR = Path(__file__).resolve().parent
 SERVER_FILE = BASE_DIR / "server.cjs"
@@ -157,6 +158,12 @@ async def start() -> None:
         return
     if _process and _process.poll() is None:
         return
+
+    try:
+        await ensure_bridge_dependencies()
+    except Exception as exc:
+        logger.error(f"CloakBrowser bridge dependency check failed: {exc}")
+        raise
 
     await _kill_process_from_pid_file()
     await _kill_process_on_port()

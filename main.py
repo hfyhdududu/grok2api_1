@@ -102,6 +102,14 @@ async def lifespan(app: FastAPI):
     from app.services.statsig_refresh import start as statsig_refresh_start
     statsig_refresh_start()
 
+    if get_config("cloakbrowser.enabled", False):
+        try:
+            from app.services.browser_bridge import ensure_bridge_dependencies
+
+            await ensure_bridge_dependencies()
+        except Exception as exc:
+            logger.error(f"CloakBrowser bridge 依赖自动安装失败: {exc}")
+
     if get_config("cloakbrowser.prewarm_on_start", True):
         from app.services.reverse.browser_bridge import prewarm_browser_sessions
 
