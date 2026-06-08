@@ -172,24 +172,90 @@ def _tool_card_to_source_group(card_id: str, card: Dict[str, Any]) -> Dict[str, 
     return None
 
 
-def _normalize_source_results(items: Any) -> List[Dict[str, str]]:
+def _normalize_source_results(
+    items: Any,
+    max_items: int | None = None,
+    preview_limit: int | None = None,
+) -> List[Dict[str, str]]:
     normalized: List[Dict[str, str]] = []
     seen: set[str] = set()
     for item in items or []:
+        if max_items is not None and len(normalized) >= max_items:
+            break
         if not isinstance(item, dict):
             continue
         url = str(item.get("url") or item.get("link") or "").strip()
         if not url or url in seen:
             continue
         seen.add(url)
+        preview = str(item.get("preview") or item.get("snippet") or "").strip()
+        if preview_limit is not None and len(preview) > preview_limit:
+            preview = f"{preview[:preview_limit]}…"
         normalized.append(
             {
                 "url": url,
                 "title": str(item.get("title") or "").strip(),
-                "preview": str(item.get("preview") or item.get("snippet") or "").strip(),
+                "preview": preview,
             }
         )
     return normalized
+
+
+def _compact_sources_payload(payload: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return payload
+
+    compact_groups: List[Dict[str, Any]] = []
+    for group in payload.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        compact_group = {
+            "tool_usage_card_id": group.get("tool_usage_card_id") or "",
+            "kind": group.get("kind") or "",
+            "query": group.get("query") or "",
+            "results": _normalize_source_results(
+                group.get("results") or [],
+                max_items=5,
+                preview_limit=160,
+            ),
+        }
+        compact_groups.append(compact_group)
+        if len(compact_groups) >= 20:
+            break
+
+    compact_citations = []
+    for item in payload.get("citations") or []:
+        if isinstance(item, dict):
+            compact_citations.append(
+                {
+                    "url": str(item.get("url") or "").strip(),
+                    "title": str(item.get("title") or "").strip(),
+                }
+            )
+        if len(compact_citations) >= 40:
+            break
+
+    compact_images = []
+    for item in payload.get("images") or []:
+        if isinstance(item, dict):
+            compact_images.append(
+                {
+                    "url": str(item.get("url") or "").strip(),
+                    "title": str(item.get("title") or "").strip(),
+                }
+            )
+        if len(compact_images) >= 20:
+            break
+
+    compact = {
+        "groups": compact_groups,
+        "citations": compact_citations,
+        "images": compact_images,
+        "compact": True,
+    }
+    if compact["groups"] or compact["citations"] or compact["images"]:
+        return compact
+    return None
 
 
 def _extract_card_attachment_sources(card_attachments: Any) -> Dict[str, List[Dict[str, str]]]:
@@ -551,6 +617,12 @@ def _conversation_reuse_enabled(provider_options: Dict[str, Any] | None) -> bool
     if opts.get("reuseConversation") is False:
         return False
     return True
+
+
+def _sources_mode(provider_options: Dict[str, Any] | None) -> str:
+    opts = _provider_grok_options(provider_options)
+    value = str(opts.get("sources_mode") or opts.get("sourcesMode") or "compact").strip().lower()
+    return "full" if value == "full" else "compact"
 
 
 def _latest_user_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1082,6 +1154,7 @@ class GrokChatService:
             "conversationId": conversation_id,
             "parentResponseId": parent_response_id,
             "uploadedAttachments": uploaded_attachments,
+            "sourcesMode": _sources_mode(provider_options),
         }
 
         return response, stream, model, request_metadata
@@ -1264,10 +1337,12 @@ class StreamProcessor(proc_base.BaseProcessor):
         self._image_sources: List[Dict[str, str]] = []
         self._capture_seq: int = 0
         self._request_metadata = request_metadata if isinstance(request_metadata, dict) else {}
+        self._sources_mode = str(self._request_metadata.get("sourcesMode") or "compact")
         self._conversation_id = _clean_id(self._request_metadata.get("conversationId"))
         self._parent_response_id = _clean_id(self._request_metadata.get("parentResponseId"))
         self._request_parent_response_id = self._parent_response_id
         self._emitted_answer_text = ""
+        self._final_model_message = ""
 
     def _grok_metadata(self, extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
         payload = {
@@ -1500,8 +1575,37 @@ class StreamProcessor(proc_base.BaseProcessor):
             "images": self._image_sources,
         }
         if payload["groups"] or payload["citations"] or payload["images"]:
-            return payload
+            if self._sources_mode == "full":
+                return payload
+            return _compact_sources_payload(payload)
         return None
+
+    def _remember_final_model_message(self, message: Any) -> None:
+        if isinstance(message, str) and message.strip():
+            self._final_model_message = message
+
+    async def _emit_final_message_fallback(self) -> AsyncGenerator[str, None]:
+        final_message = self._final_model_message or ""
+        if not final_message.strip():
+            return
+
+        emitted = self._emitted_answer_text or ""
+        if not emitted.strip():
+            if self.think_opened:
+                async for chunk in self._close_think_block():
+                    yield chunk
+            self._remember_answer_text(final_message)
+            yield self._sse(final_message)
+            return
+
+        if final_message.startswith(emitted):
+            suffix = final_message[len(emitted):]
+            if suffix.strip():
+                if self.think_opened:
+                    async for chunk in self._close_think_block():
+                        yield chunk
+                self._remember_answer_text(suffix)
+                yield self._sse(suffix)
 
     async def _close_think_block(self) -> AsyncGenerator[str, None]:
         """Close the visible think block before emitting normal answer content."""
@@ -1681,6 +1785,7 @@ class StreamProcessor(proc_base.BaseProcessor):
                     continue
 
                 if mr := resp.get("modelResponse"):
+                    self._remember_final_model_message(mr.get("message"))
                     if response_id := _clean_id(mr.get("responseId")):
                         self._parent_response_id = response_id
                         yield self._sse(grok=self._grok_metadata())
@@ -1823,6 +1928,8 @@ class StreamProcessor(proc_base.BaseProcessor):
 
             async for chunk in self._emit_follow_up_fallback():
                 yield chunk
+            async for chunk in self._emit_final_message_fallback():
+                yield chunk
             if self.think_opened:
                 async for chunk in self._close_think_block():
                     yield chunk
@@ -1913,6 +2020,7 @@ class CollectProcessor(proc_base.BaseProcessor):
         self.tools = tools
         self.tool_choice = tool_choice
         self._request_metadata = request_metadata if isinstance(request_metadata, dict) else {}
+        self._sources_mode = str(self._request_metadata.get("sourcesMode") or "compact")
 
     def _filter_content(self, content: str) -> str:
         """Filter special tags in content."""
@@ -2088,6 +2196,8 @@ class CollectProcessor(proc_base.BaseProcessor):
                 finish_reason = "tool_calls"
 
         sources_payload = extract_sources_payload(final_model_response)
+        if sources_payload and self._sources_mode != "full":
+            sources_payload = _compact_sources_payload(sources_payload)
         render_payload = extract_render_payload(final_model_response)
         if render_payload:
             render_payload = await _cache_render_files(

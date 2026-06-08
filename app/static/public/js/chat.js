@@ -3966,7 +3966,8 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
         grok: {
           conversation_id: session ? session.grokConversationId || '' : '',
           parent_response_id: session ? session.grokParentResponseId || '' : '',
-          reuse_conversation: true
+          reuse_conversation: true,
+          sources_mode: 'full'
         }
       }
     };
@@ -3989,7 +3990,8 @@ import { createChatSessionStore } from '../src/chat/chat_session_store.js';
         grok: {
           conversation_id: session ? session.grokConversationId || '' : '',
           parent_response_id: session ? session.grokParentResponseId || '' : '',
-          reuse_conversation: true
+          reuse_conversation: true,
+          sources_mode: 'full'
         }
       }
     };
