@@ -445,6 +445,113 @@ async function prepareUsableChat(page, label, options = {}) {
   return navigateToUsableChat(page, label);
 }
 
+async function readComposerText(input) {
+  try {
+    return await input.evaluate((node) => {
+      if (!node) return "";
+      if (typeof node.value === "string") {
+        return node.value;
+      }
+      return node.textContent || node.innerText || "";
+    });
+  } catch (_) {
+    return "";
+  }
+}
+
+async function fillComposerWithProbe(page, input, message, label) {
+  await input.click({ timeout: 5000 }).catch(async () => {
+    await input.click({ timeout: 5000, force: true });
+  });
+
+  try {
+    await input.fill("");
+  } catch (_) {}
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+  await page.keyboard.press("Backspace").catch(() => {});
+  await page.keyboard.type(String(message || ""), { delay: 5 });
+
+  let actual = (await readComposerText(input)).trim();
+  if (actual === String(message || "").trim()) {
+    log(`${label}: probe message filled and verified on first attempt`);
+    return true;
+  }
+
+  log(
+    `${label}: probe message verify failed on first attempt expected=${JSON.stringify(
+      String(message || "")
+    )} actual=${JSON.stringify(actual)}`
+  );
+
+  try {
+    await input.fill(String(message || ""));
+  } catch (_) {
+    await input.click({ timeout: 5000, force: true }).catch(() => {});
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+    await page.keyboard.type(String(message || ""), { delay: 20 }).catch(() => {});
+  }
+
+  actual = (await readComposerText(input)).trim();
+  if (actual === String(message || "").trim()) {
+    log(`${label}: probe message filled and verified on second attempt`);
+    return true;
+  }
+
+  log(
+    `${label}: probe message verify failed on second attempt expected=${JSON.stringify(
+      String(message || "")
+    )} actual=${JSON.stringify(actual)}`
+  );
+  return false;
+}
+
+async function submitProbeFromReadyPage(page, input, label) {
+  const sendBtn = page
+    .locator('button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"]')
+    .first();
+
+  const requestPromise = page.waitForRequest(
+    (request) => isConversationSubmitUrl(request.url()) && request.method() === "POST",
+    { timeout: 8000 }
+  );
+  const clearedPromise = page
+    .waitForFunction(
+      (node) => {
+        if (!node) return false;
+        const value = typeof node.value === "string" ? node.value : node.textContent || node.innerText || "";
+        return !String(value || "").trim();
+      },
+      await input.elementHandle(),
+      { timeout: 8000 }
+    )
+    .catch(() => null);
+
+  if (await sendBtn.isVisible().catch(() => false)) {
+    await sendBtn.click({ timeout: 5000 }).catch(async () => {
+      await page.keyboard.press("Enter");
+    });
+  } else {
+    await page.keyboard.press("Enter");
+  }
+
+  const requestMatched = await requestPromise
+    .then(() => true)
+    .catch(() => false);
+  const composerCleared = (await clearedPromise) !== null;
+
+  if (requestMatched) {
+    log(`${label}: probe submit triggered request`);
+    return true;
+  }
+  if (composerCleared) {
+    log(`${label}: probe submit cleared composer without captured request`);
+    return true;
+  }
+
+  log(`${label}: probe submit did not trigger request or clear composer`);
+  return false;
+}
+
 async function refreshSessionSnapshot(slot) {
   const { page, context } = slot;
   const cookies = await context.cookies("https://grok.com");
@@ -762,59 +869,57 @@ async function probeAppChatHeaders(slot, force = false) {
   }
 
   const { page } = slot;
-  const input = await prepareUsableChat(page, "probe", { skipInitialGoto: true });
-  await enableTemporaryMode(page, true);
-  slot.probePageInfo = await page
-    .evaluate(() => ({
-      darkModeEnabled: window.matchMedia?.("(prefers-color-scheme: dark)")?.matches || false,
-      devicePixelRatio: window.devicePixelRatio || 1,
-      screen: {
-        width: window.screen?.width || 0,
-        height: window.screen?.height || 0,
-      },
-      viewport: {
-        width: window.innerWidth || 0,
-        height: window.innerHeight || 0,
-      },
-    }))
-    .catch(() => ({}));
-  slot.probeActive = true;
+  let input = await prepareUsableChat(page, "probe", { skipInitialGoto: true });
+  let attemptedReuse = true;
 
-  await input.click({ timeout: 5000 }).catch(async () => {
-    await input.click({ timeout: 5000, force: true });
-  });
+  while (true) {
+    await enableTemporaryMode(page, true);
+    slot.probePageInfo = await page
+      .evaluate(() => ({
+        darkModeEnabled: window.matchMedia?.("(prefers-color-scheme: dark)")?.matches || false,
+        devicePixelRatio: window.devicePixelRatio || 1,
+        screen: {
+          width: window.screen?.width || 0,
+          height: window.screen?.height || 0,
+        },
+        viewport: {
+          width: window.innerWidth || 0,
+          height: window.innerHeight || 0,
+        },
+      }))
+      .catch(() => ({}));
+    slot.probeActive = true;
 
-  try {
-    await input.fill("");
-  } catch (_) {}
-  await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
-  await page.keyboard.press("Backspace").catch(() => {});
-  await page.keyboard.type(PROBE_MESSAGE, { delay: 5 });
+    try {
+      const filled = await fillComposerWithProbe(page, input, PROBE_MESSAGE, "probe");
+      if (!filled) {
+        if (attemptedReuse) {
+          log("probe: prepared page composer state is unstable, fallback to full navigation");
+          input = await navigateToUsableChat(page, "probe-fallback");
+          attemptedReuse = false;
+          continue;
+        }
+        throw new BridgeError("probe_input_unstable", "Probe composer did not accept full message", 502);
+      }
 
-  const requestPromise = page.waitForRequest(
-    (request) => isConversationSubmitUrl(request.url()) && request.method() === "POST",
-    { timeout: Math.min(REQUEST_TIMEOUT, 30000) }
-  );
+      const submitted = await submitProbeFromReadyPage(page, input, "probe");
+      if (!submitted) {
+        if (attemptedReuse) {
+          log("probe: prepared page submit not triggered, fallback to full navigation");
+          input = await navigateToUsableChat(page, "probe-fallback");
+          attemptedReuse = false;
+          continue;
+        }
+        throw new BridgeError("probe_submit_unavailable", "Probe submit action did not trigger request", 502);
+      }
 
-  const sendBtn = page
-    .locator('button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"]')
-    .first();
-
-  if (await sendBtn.isVisible().catch(() => false)) {
-    await sendBtn.click({ timeout: 5000 }).catch(async () => {
-      await page.keyboard.press("Enter");
-    });
-  } else {
-    await page.keyboard.press("Enter");
-  }
-
-  try {
-    await requestPromise;
-    await waitForCapturedHeaders(slot.sso, 5000);
-    await refreshSessionSnapshot(slot).catch(() => {});
-  } finally {
-    slot.probeActive = false;
-    slot.probePageInfo = null;
+      await waitForCapturedHeaders(slot.sso, 5000);
+      await refreshSessionSnapshot(slot).catch(() => {});
+      break;
+    } finally {
+      slot.probeActive = false;
+      slot.probePageInfo = null;
+    }
   }
 
   const snapshot = sessionSnapshots.get(slot.sso) || {};
