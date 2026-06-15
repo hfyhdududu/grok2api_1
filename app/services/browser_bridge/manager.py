@@ -151,7 +151,17 @@ async def _kill_process_from_pid_file() -> None:
     PID_FILE.unlink(missing_ok=True)
 
 
-async def start() -> None:
+def _bridge_proxy_url() -> str:
+    if not bool(get_config("cloakbrowser.use_system_proxy", True)):
+        return ""
+    return str(get_config("proxy.base_proxy_url", "") or "").strip()
+
+
+def _bridge_user_agent() -> str:
+    return str(get_config("proxy.user_agent", "") or "").strip()
+
+
+async def start(cf_cookies: list | None = None) -> None:
     global _process
     if not _enabled():
         logger.info("CloakBrowser bridge disabled, skip start")
@@ -199,6 +209,20 @@ async def start() -> None:
     env["GROK_CLOAK_PROBE_CONSUME_UPSTREAM"] = (
         "true" if bool(get_config("cloakbrowser.probe_consume_upstream", False)) else "false"
     )
+
+    proxy_url = _bridge_proxy_url()
+    if proxy_url:
+        env["GROK_CLOAK_PROXY_URL"] = proxy_url
+    user_agent = _bridge_user_agent()
+    if user_agent:
+        env["GROK_CLOAK_USER_AGENT"] = user_agent
+    if cf_cookies:
+        env["GROK_CLOAK_CF_COOKIES_JSON"] = json.dumps(cf_cookies, ensure_ascii=False)
+    try:
+        cf_timeout = int(get_config("proxy.timeout", 60) or 60)
+    except Exception:
+        cf_timeout = 60
+    env["GROK_CLOAK_CF_WAIT_TIMEOUT_MS"] = str(max(cf_timeout * 1000 + 30000, 90000))
 
     executable_path = str(get_config("cloakbrowser.executable_path", "") or "").strip()
     if executable_path:

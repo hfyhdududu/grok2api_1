@@ -19,7 +19,7 @@ async def refresh_once() -> bool:
 
         logger.info("=" * 50)
         logger.info("statsig scheduler refresh started")
-        await refresh_browser_probe_managed("", True, True, reason="scheduler")
+        await refresh_browser_probe_managed("", True, reason="scheduler")
         logger.info("statsig scheduler refresh completed")
         return True
     except Exception as exc:

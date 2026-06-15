@@ -97,10 +97,23 @@ async def lifespan(app: FastAPI):
         })
 
     from app.services.cf_refresh import start as cf_refresh_start
+    from app.services.cf_refresh import wait_for_initial_cf_refresh
+
     cf_refresh_start()
 
     from app.services.statsig_refresh import start as statsig_refresh_start
     statsig_refresh_start()
+
+    needs_startup_cf = bool(get_config("proxy.enabled", False)) or (
+        get_config("cloakbrowser.enabled", False)
+        and get_config("cloakbrowser.cf_before_probe", True)
+    )
+    if needs_startup_cf:
+        cf_ready = await wait_for_initial_cf_refresh(
+            timeout=float(get_config("proxy.timeout", 60) or 60) + 60.0
+        )
+        if not cf_ready:
+            logger.warning("启动时 CF clearance 未就绪，CloakBrowser probe 将按需自行刷新")
 
     if get_config("cloakbrowser.enabled", False):
         try:
@@ -109,6 +122,14 @@ async def lifespan(app: FastAPI):
             await ensure_bridge_dependencies()
         except Exception as exc:
             logger.error(f"CloakBrowser bridge 依赖自动安装失败: {exc}")
+
+        if get_config("cloakbrowser.keep_bridge_alive", True):
+            try:
+                from app.services.browser_bridge import start as start_browser_bridge
+
+                await start_browser_bridge()
+            except Exception as exc:
+                logger.warning(f"CloakBrowser bridge 常驻启动失败: {exc}")
 
     if get_config("cloakbrowser.prewarm_on_start", True):
         from app.services.reverse.browser_bridge import prewarm_browser_sessions

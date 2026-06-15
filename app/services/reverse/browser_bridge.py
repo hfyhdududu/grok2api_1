@@ -26,6 +26,7 @@ _PROFILE_CACHE_KEY = "__profile__"
 _GLOBAL_PROBE_KEY = "__global_probe__"
 _PROBE_CACHE_LOADED = False
 _PROBE_REFRESH_LOCK = threading.Lock()
+_PROBE_CF_FAILURE = False
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 
@@ -125,10 +126,184 @@ def _cached_probe_session_payload() -> Dict[str, Any]:
     }
 
 
-async def _ensure_bridge_started() -> None:
+def _use_system_proxy() -> bool:
+    return bool(get_config("cloakbrowser.use_system_proxy", True))
+
+
+def _cf_before_probe_enabled() -> bool:
+    if not bool(get_config("cloakbrowser.cf_before_probe", True)):
+        return False
+    from app.services.cf_refresh.config import get_flaresolverr_url
+
+    return bool(str(get_flaresolverr_url() or "").strip())
+
+
+def _mark_probe_cf_failure() -> None:
+    global _PROBE_CF_FAILURE
+    _PROBE_CF_FAILURE = True
+
+
+def _clear_probe_cf_failure() -> None:
+    global _PROBE_CF_FAILURE
+    _PROBE_CF_FAILURE = False
+
+
+def _extract_config_cf_clearance() -> str:
+    from app.services.cf_refresh.config import get_cf_clearance_value
+
+    return get_cf_clearance_value()
+
+
+def _cf_refresh_reuse_grace_seconds() -> float:
+    try:
+        from app.services.cf_refresh.config import get_refresh_interval
+
+        return float(get_refresh_interval())
+    except Exception:
+        return 3600.0
+
+
+def _should_refresh_cf_for_probe(*, force: bool = False) -> tuple[bool, str]:
+    from app.services.cf_refresh.config import get_cf_cookies_value, is_cf_clearance_usable
+    from app.services.cf_refresh.scheduler import seconds_since_cf_refresh
+
+    if force:
+        return True, "forced"
+    if _PROBE_CF_FAILURE:
+        return True, "last_probe_cf_failed"
+    recent = seconds_since_cf_refresh()
+    grace = _cf_refresh_reuse_grace_seconds()
+    if recent is not None and recent < grace:
+        if get_cf_cookies_value() or _extract_config_cf_clearance():
+            return False, "cf_refresh_recent"
+    if is_cf_clearance_usable():
+        return False, "clearance_reusable"
+    clearance = _extract_config_cf_clearance()
+    if not clearance:
+        return True, "clearance_missing"
+    return True, "clearance_expired"
+
+
+def _reused_cf_context_from_config() -> Dict[str, Any]:
+    from app.services.cf_refresh.config import get_cf_cookies_value, get_cf_clearance_value
+
+    cf_cookies = get_cf_cookies_value()
+    clearance = get_cf_clearance_value()
+    cookie_source = cf_cookies or (f"cf_clearance={clearance}" if clearance else "")
+    cookies = _cookie_string_to_playwright(cookie_source)
+    if not cookies:
+        return {}
+    return {
+        "cookies": cookies,
+        "user_agent": str(get_config("proxy.user_agent") or "").strip(),
+        "cf_clearance": clearance,
+        "browser": str(get_config("proxy.browser") or "").strip(),
+        "cf_cookies": cf_cookies,
+        "reused": True,
+    }
+
+
+async def _sync_cf_proxy_config(cf_context: Dict[str, Any]) -> None:
+    if not cf_context or cf_context.get("reused"):
+        return
+    try:
+        from app.core.config import config
+
+        proxy_update: Dict[str, Any] = {}
+        if cf_context.get("cf_cookies"):
+            proxy_update["cf_cookies"] = cf_context["cf_cookies"]
+        if cf_context.get("cf_clearance"):
+            proxy_update["cf_clearance"] = cf_context["cf_clearance"]
+        if cf_context.get("user_agent"):
+            proxy_update["user_agent"] = cf_context["user_agent"]
+        if cf_context.get("browser"):
+            proxy_update["browser"] = cf_context["browser"]
+        if proxy_update:
+            await config.update({"proxy": proxy_update})
+    except Exception as exc:
+        logger.warning(f"Browser probe CF config sync skipped: {exc}")
+
+
+async def _prepare_cf_for_probe(*, force: bool = False) -> Dict[str, Any]:
+    if not _cf_before_probe_enabled():
+        return {}
+    should_refresh, reason = _should_refresh_cf_for_probe(force=force)
+    if should_refresh:
+        logger.info(f"Browser probe CF refresh required: reason={reason}")
+        cf_context = await _resolve_cf_for_probe()
+        if cf_context:
+            _clear_probe_cf_failure()
+            await _sync_cf_proxy_config(cf_context)
+        return cf_context
+    reused = _reused_cf_context_from_config()
+    if reused:
+        logger.info(
+            "Browser probe CF refresh skipped: "
+            f"reason={reason}, source=cf_refresh_config, cookies={len(reused.get('cookies') or [])}"
+        )
+        return reused
+    logger.warning(
+        f"Browser probe CF refresh fallback: reason={reason}, but reusable cookies unavailable"
+    )
+    return await _resolve_cf_for_probe()
+
+
+def _keep_bridge_alive() -> bool:
+    return bool(get_config("cloakbrowser.keep_bridge_alive", True))
+
+
+def _cookie_string_to_playwright(cookie_str: str, domain: str = ".grok.com") -> list[dict[str, Any]]:
+    cookies: list[dict[str, Any]] = []
+    for part in str(cookie_str or "").split(";"):
+        item = part.strip()
+        if not item or "=" not in item:
+            continue
+        name, _, value = item.partition("=")
+        name = name.strip()
+        value = value.strip()
+        if not name:
+            continue
+        cookies.append(
+            {
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": "/",
+                "secure": True,
+            }
+        )
+    return cookies
+
+
+async def _resolve_cf_for_probe() -> Dict[str, Any]:
+    from app.services.cf_refresh.solver import solve_cf_challenge
+
+    logger.info("Browser probe CF refresh via FlareSolverr started")
+    result = await solve_cf_challenge()
+    if not result:
+        logger.warning("Browser probe CF refresh via FlareSolverr failed")
+        return {}
+    cookies = _cookie_string_to_playwright(str(result.get("cookies") or ""))
+    if not cookies:
+        logger.warning("Browser probe CF refresh returned no cookies")
+        return {}
+    logger.info(
+        "Browser probe CF refresh succeeded: "
+        f"cookies={len(cookies)}, clearance={'yes' if result.get('cf_clearance') else 'no'}"
+    )
+    return {
+        "cookies": cookies,
+        "user_agent": str(result.get("user_agent") or "").strip(),
+        "cf_clearance": str(result.get("cf_clearance") or "").strip(),
+        "browser": str(result.get("browser") or "").strip(),
+        "cf_cookies": str(result.get("cookies") or "").strip(),
+    }
+
+
+async def _ensure_bridge_started(cf_cookies: list | None = None) -> None:
     if await bridge_healthcheck():
         return
-    await start_bridge()
+    await start_bridge(cf_cookies=cf_cookies)
 
 
 async def _stop_bridge_after_refresh() -> None:
@@ -210,12 +385,19 @@ def _session_request_sync(sso: str = "") -> Dict[str, Any]:
         ) from exc
 
 
-def _probe_request_sync(sso: str = "", force: bool = False) -> Dict[str, Any]:
+def _probe_request_sync(
+    sso: str = "",
+    force: bool = False,
+    *,
+    probe_cookies: list | None = None,
+) -> Dict[str, Any]:
     payload: dict[str, Any] = {}
     if sso:
         payload["sso"] = sso
     if force:
         payload["force"] = True
+    if probe_cookies:
+        payload["cookies"] = probe_cookies
     body = json.dumps(payload).encode("utf-8")
     req = urllib_request.Request(
         f"{_bridge_base_url()}/api/probe",
@@ -444,7 +626,13 @@ def get_browser_profile_session(max_age_seconds: int = 120, force_refresh: bool 
     return data
 
 
-def refresh_browser_probe(token: str = "", wait: bool = True, reason: str = "manual") -> Dict[str, Any]:
+def refresh_browser_probe(
+    token: str = "",
+    wait: bool = True,
+    reason: str = "manual",
+    *,
+    probe_cookies: list | None = None,
+) -> Dict[str, Any]:
     sso = _extract_raw_sso(token)
     if not bridge_enabled() or not get_config("cloakbrowser.sync_session", True):
         return {}
@@ -453,7 +641,14 @@ def refresh_browser_probe(token: str = "", wait: bool = True, reason: str = "man
         logger.info(f"Browser probe refresh skipped: reason={reason}, another refresh is already running")
         return {}
     try:
-        probe_data = _probe_request_sync(sso, force=True)
+        try:
+            probe_data = _probe_request_sync(sso, force=True, probe_cookies=probe_cookies)
+        except UpstreamException as exc:
+            if str((exc.details or {}).get("bridge_code") or "") == "cloudflare_blocked":
+                _mark_probe_cf_failure()
+            raise
+        if _has_captured_app_chat_headers(probe_data):
+            _clear_probe_cf_failure()
         if probe_data:
             _clear_global_probe_cache()
             _clear_session_probe_cache()
@@ -475,17 +670,52 @@ def refresh_browser_probe(token: str = "", wait: bool = True, reason: str = "man
 async def refresh_browser_probe_managed(
     token: str = "",
     wait: bool = True,
-    shutdown_after: bool = True,
+    shutdown_after: bool | None = None,
     reason: str = "manual",
 ) -> Dict[str, Any]:
     """Start bridge on demand, refresh probe once, then optionally stop it."""
-    logger.info(
-        "Browser probe managed refresh requested: "
-        f"reason={reason}, shutdown_after={'yes' if shutdown_after else 'no'}"
-    )
-    await _ensure_bridge_started()
+    if shutdown_after is None:
+        shutdown_after = not _keep_bridge_alive()
+    last_exc: UpstreamException | None = None
     try:
-        return await asyncio.to_thread(refresh_browser_probe, token, wait, reason)
+        for attempt in range(2):
+            force_cf = attempt > 0
+            cf_context = await _prepare_cf_for_probe(force=force_cf)
+            probe_cookies = cf_context.get("cookies") if cf_context else None
+            cf_refreshed = bool(cf_context and not cf_context.get("reused"))
+            logger.info(
+                "Browser probe managed refresh requested: "
+                f"reason={reason}, attempt={attempt + 1}, "
+                f"shutdown_after={'yes' if shutdown_after else 'no'}, "
+                f"cf_refreshed={'yes' if cf_refreshed else 'no'}, "
+                f"cf_cookies={'yes' if probe_cookies else 'no'}, "
+                f"use_proxy={'yes' if _use_system_proxy() and get_config('proxy.base_proxy_url') else 'no'}"
+            )
+            bridge_running = await bridge_healthcheck()
+            await _ensure_bridge_started(probe_cookies if not bridge_running else None)
+            try:
+                return await asyncio.to_thread(
+                    refresh_browser_probe,
+                    token,
+                    wait,
+                    reason,
+                    probe_cookies=probe_cookies,
+                )
+            except UpstreamException as exc:
+                last_exc = exc
+                if (
+                    attempt == 0
+                    and str((exc.details or {}).get("bridge_code") or "") == "cloudflare_blocked"
+                ):
+                    _mark_probe_cf_failure()
+                    logger.warning(
+                        "Browser probe blocked by Cloudflare, retrying once with FlareSolverr refresh"
+                    )
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
+        return {}
     finally:
         if shutdown_after:
             await _stop_bridge_after_refresh()
@@ -547,7 +777,7 @@ async def prewarm_browser_sessions() -> None:
         try:
             if get_config("cloakbrowser.profile_session", True):
                 await asyncio.to_thread(get_browser_profile_session, 0, True)
-            probe_data = await asyncio.to_thread(refresh_browser_probe, "", True)
+            probe_data = await refresh_browser_probe_managed("", True, None, reason="prewarm")
             logger.info(
                 "Browser session prewarm completed: "
                 f"strategy=single_global_probe, statsig={'yes' if (probe_data or {}).get('x_statsig_id') else 'no'}"

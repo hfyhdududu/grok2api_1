@@ -16,6 +16,10 @@ const HEADLESS = String(process.env.GROK_CLOAK_HEADLESS || "true").toLowerCase()
 const EXECUTABLE_PATH = (process.env.GROK_CLOAK_EXECUTABLE_PATH || "").trim();
 const PROFILE_DIR = (process.env.GROK_CLOAK_PROFILE_DIR || "").trim();
 const DIAG_DIR = (process.env.GROK_CLOAK_DIAG_DIR || "").trim();
+const PROXY_URL = (process.env.GROK_CLOAK_PROXY_URL || "").trim();
+const DEFAULT_USER_AGENT = (process.env.GROK_CLOAK_USER_AGENT || "").trim();
+const CF_COOKIES_JSON = (process.env.GROK_CLOAK_CF_COOKIES_JSON || "").trim();
+const CF_WAIT_TIMEOUT_MS = parseInt(process.env.GROK_CLOAK_CF_WAIT_TIMEOUT_MS || "90000", 10);
 
 let browser = null;
 const pages = new Map();
@@ -29,10 +33,10 @@ const SESSION_COOKIES_JSON = (process.env.GROK_CLOAK_SESSION_COOKIES_JSON || "")
 const CACHED_PROBE_JSON = (process.env.GROK_CLOAK_CACHED_PROBE_JSON || "").trim();
 const PROBE_CONSUME_UPSTREAM = String(process.env.GROK_CLOAK_PROBE_CONSUME_UPSTREAM || "false").toLowerCase() === "true";
 
-function parseInjectedCookies() {
-  if (!SESSION_COOKIES_JSON) return [];
+function parseCookiesJson(raw) {
+  if (!raw) return [];
   try {
-    const parsed = JSON.parse(SESSION_COOKIES_JSON);
+    const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed
       .map((item) => {
@@ -63,9 +67,34 @@ function parseInjectedCookies() {
       })
       .filter(Boolean);
   } catch (error) {
-    log(`session cookies json parse failed: ${error.message}`);
+    log(`cookies json parse failed: ${error.message}`);
     return [];
   }
+}
+
+function parseInjectedCookies() {
+  return parseCookiesJson(SESSION_COOKIES_JSON);
+}
+
+function parseCfCookies() {
+  return parseCookiesJson(CF_COOKIES_JSON);
+}
+
+function mergeCookies(...lists) {
+  const map = new Map();
+  for (const list of lists) {
+    for (const cookie of list || []) {
+      if (cookie && cookie.name) {
+        map.set(cookie.name, cookie);
+      }
+    }
+  }
+  return [...map.values()];
+}
+
+function buildProxyOption() {
+  if (!PROXY_URL) return undefined;
+  return { server: PROXY_URL };
 }
 
 function parseCachedProbe() {
@@ -90,7 +119,7 @@ function parseCachedProbe() {
 const CACHED_PROBE = parseCachedProbe();
 
 function getEffectiveUserAgent() {
-  return CACHED_PROBE.user_agent || "";
+  return DEFAULT_USER_AGENT || CACHED_PROBE.user_agent || "";
 }
 
 function buildTemporaryProbePayload(basePayload = {}, pageInfo = {}) {
@@ -269,6 +298,10 @@ async function ensureBrowser() {
       "--no-sandbox",
     ],
   };
+  const proxy = buildProxyOption();
+  if (proxy) {
+    launchOptions.proxy = proxy;
+  }
   const effectiveUserAgent = getEffectiveUserAgent();
   if (EXECUTABLE_PATH) {
     launchOptions.executablePath = EXECUTABLE_PATH;
@@ -297,7 +330,7 @@ async function ensureBrowser() {
 }
 
 async function createContextWithCookies(playwrightBrowser, sso) {
-  const injectedCookies = parseInjectedCookies();
+  const injectedCookies = mergeCookies(parseCfCookies(), parseInjectedCookies());
   const effectiveUserAgent = getEffectiveUserAgent();
   const authCookies = [];
   if (sso) {
@@ -319,14 +352,64 @@ async function createContextWithCookies(playwrightBrowser, sso) {
     return { context: playwrightBrowser, page: await playwrightBrowser.newPage() };
   }
 
+  const contextProxy = buildProxyOption();
   const context = await playwrightBrowser.newContext({
     viewport: { width: 1600, height: 1000 },
     ...(effectiveUserAgent ? { userAgent: effectiveUserAgent } : {}),
+    ...(contextProxy ? { proxy: contextProxy } : {}),
   });
   if (cookiesToAdd.length) {
     await context.addCookies(cookiesToAdd);
   }
   return { context, page: await context.newPage() };
+}
+
+async function isCloudflareChallenge(page) {
+  try {
+    return await page.evaluate(() => {
+      const title = document.title || "";
+      const body = document.body?.innerText || "";
+      const html = document.body?.innerHTML || "";
+      return (
+        /just a moment/i.test(title) ||
+        /checking your browser/i.test(body) ||
+        /cf-browser-verification/i.test(html) ||
+        /challenge-platform/i.test(html)
+      );
+    });
+  } catch (_) {
+    return false;
+  }
+}
+
+async function waitForCloudflare(page, label = "page") {
+  const deadline = Date.now() + CF_WAIT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const blocked = await isCloudflareChallenge(page);
+    if (!blocked) {
+      const hasInput = await page
+        .locator("textarea, [contenteditable='true']")
+        .first()
+        .isVisible({ timeout: 1500 })
+        .catch(() => false);
+      if (hasInput) {
+        log(`${label}: cloudflare challenge cleared`);
+        return true;
+      }
+    }
+    await page.waitForTimeout(1000);
+  }
+  log(`${label}: cloudflare wait timed out after ${CF_WAIT_TIMEOUT_MS}ms`);
+  return false;
+}
+
+async function applyProbeCookies(context, cookies) {
+  if (!Array.isArray(cookies) || !cookies.length) return false;
+  const normalized = cookies.filter((item) => item && item.name);
+  if (!normalized.length) return false;
+  await context.addCookies(normalized);
+  log(`applied probe cookies count=${normalized.length}`);
+  return true;
 }
 
 async function prepareSlot(slot) {
@@ -336,6 +419,7 @@ async function prepareSlot(slot) {
     timeout: NAV_TIMEOUT,
   });
   await page.waitForLoadState("networkidle", { timeout: READY_TIMEOUT }).catch(() => {});
+  await waitForCloudflare(page, "prepare-slot").catch(() => {});
 
   const cookies = await slot.context.cookies("https://grok.com");
   const cookieSso = extractSsoFromCookies(cookies);
@@ -386,6 +470,15 @@ async function navigateToUsableChat(page, label) {
     timeout: NAV_TIMEOUT,
   });
   await page.waitForLoadState("networkidle", { timeout: READY_TIMEOUT }).catch(() => {});
+  const cfReady = await waitForCloudflare(page, label).catch(() => false);
+  if (!cfReady && (await isCloudflareChallenge(page))) {
+    await captureDiagnostics(page, `${label}-cloudflare-blocked`);
+    throw new BridgeError(
+      "cloudflare_blocked",
+      "Cloudflare challenge not cleared before chat probe",
+      403
+    );
+  }
   await dismissCookieBanner(page);
 
   if (await hasInaccessiblePrivateLink(page)) {
@@ -852,7 +945,7 @@ async function waitForCapturedHeaders(sso, timeoutMs) {
   return hasCapturedAppChatHeaders(sso);
 }
 
-async function probeAppChatHeaders(slot, force = false) {
+async function probeAppChatHeaders(slot, force = false, credentials = {}) {
   if (!force && hasCapturedAppChatHeaders(slot.sso)) {
     return sessionSnapshots.get(slot.sso) || {};
   }
@@ -868,9 +961,11 @@ async function probeAppChatHeaders(slot, force = false) {
     }
   }
 
-  const { page } = slot;
-  let input = await prepareUsableChat(page, "probe", { skipInitialGoto: true });
-  let attemptedReuse = true;
+  const { page, context } = slot;
+  const freshCookies = Array.isArray(credentials.cookies) ? credentials.cookies : [];
+  const injectedFreshCookies = await applyProbeCookies(context, freshCookies);
+  let input = await prepareUsableChat(page, "probe", { skipInitialGoto: !injectedFreshCookies });
+  let attemptedReuse = !injectedFreshCookies;
 
   while (true) {
     await enableTemporaryMode(page, true);
@@ -1031,6 +1126,9 @@ const server = http.createServer(async (req, res) => {
       const body = await readJson(req);
       const sso = typeof body.sso === "string" ? body.sso.trim() : "";
       const force = body.force === true;
+      const credentials = {
+        cookies: Array.isArray(body.cookies) ? body.cookies : [],
+      };
       const slot = await getSlot(sso);
       if (slot.busy) {
         throw new BridgeError("page_busy", "Bridge page busy", 429);
@@ -1038,7 +1136,7 @@ const server = http.createServer(async (req, res) => {
       slot.busy = true;
       slot.lastUsed = Date.now();
       try {
-        const snapshot = await probeAppChatHeaders(slot, force);
+        const snapshot = await probeAppChatHeaders(slot, force, credentials);
         lastError = null;
         return respond(res, 200, snapshot || {});
       } finally {

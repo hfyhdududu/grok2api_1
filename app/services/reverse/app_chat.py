@@ -114,7 +114,7 @@ class AppChatReverse:
             return
         try:
             logger.info(f"Browser probe background refresh started: reason={reason}")
-            await refresh_browser_probe_managed(token, False, True)
+            await refresh_browser_probe_managed(token, False, reason="app_chat_sse_start")
             logger.info(f"Browser probe background refresh completed: reason={reason}")
         except Exception as exc:
             logger.warning(f"Browser probe background refresh failed: reason={reason}, error={exc}")
@@ -392,7 +392,7 @@ class AppChatReverse:
                         logger.warning(
                             "AppChat 403 with browser probe headers, force refreshing probe and retrying once"
                         )
-                        await refresh_browser_probe_managed(token, True, True)
+                        await refresh_browser_probe_managed(token, True, reason="app_chat_403")
                         headers = _build_chat_headers()
                         response = await _post_once(headers)
                         logger.info(

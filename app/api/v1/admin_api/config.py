@@ -167,7 +167,7 @@ async def refresh_statsig():
     if not browser_bridge_enabled():
         raise HTTPException(status_code=400, detail="CloakBrowser bridge 未启用")
     try:
-        await refresh_browser_probe_managed("", True, True, reason="manual")
+        await refresh_browser_probe_managed("", True, reason="manual")
         return {
             "status": "success",
             "message": "x-statsig-id 已刷新",

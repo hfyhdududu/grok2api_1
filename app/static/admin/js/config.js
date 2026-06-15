@@ -226,7 +226,10 @@ const LOCALE_MAP = {
     "wait_probe_timeout": { title: "等待 Probe 超时", desc: "请求前等待后台 probe 完成的最长时间（秒）。" },
     "refresh_probe_after_success": { title: "成功后自动刷新", desc: "每次 chat 成功结束后刷新下一份 probe。建议关闭，避免无必要轮换 x-statsig-id。" },
     "private_chat_url": { title: "Probe 入口 URL", desc: "浏览器抓取 probe 时优先进入的页面地址。" },
-    "probe_message": { title: "Probe 文本", desc: "触发真实浏览器 app-chat 请求时发送的探针文本。" }
+    "probe_message": { title: "Probe 文本", desc: "触发真实浏览器 app-chat 请求时发送的探针文本。" },
+    "use_system_proxy": { title: "复用系统代理", desc: "让 CloakBrowser 与 FlareSolverr 使用相同的 proxy.base_proxy_url 出口，保证 cf_clearance 与浏览器 IP 一致。" },
+    "cf_before_probe": { title: "Probe 前按需刷新 CF", desc: "仅在 cf_clearance 缺失、过期或上次 probe 因 CF 失败时，才通过 FlareSolverr 刷新并注入浏览器。" },
+    "keep_bridge_alive": { title: "Bridge 常驻", desc: "probe 完成后保持 CloakBrowser Bridge 进程运行，复用已过 CF 的页面与 profile。" }
   }
 };
 

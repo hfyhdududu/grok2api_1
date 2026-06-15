@@ -204,6 +204,12 @@ executable_path = ""
 profile_dir = "data/cloakbrowser-profile"
 # 是否无头运行
 headless = false
+# 是否复用 proxy.base_proxy_url 作为浏览器出口代理（与 FlareSolverr 保持同 IP）
+use_system_proxy = true
+# probe 前按需通过 FlareSolverr 刷新 CF（clearance 缺失/过期或上次 probe 因 CF 失败时）
+cf_before_probe = true
+# probe / 刷新完成后是否保持 Bridge 进程常驻
+keep_bridge_alive = true
 
 # ==================== 图像配置 ====================
 [image]
