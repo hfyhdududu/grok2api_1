@@ -76,6 +76,30 @@ function parseInjectedCookies() {
   return parseCookiesJson(SESSION_COOKIES_JSON);
 }
 
+function serializeCookiesForConfig(cookies) {
+  return (cookies || [])
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const name = String(item.name || "").trim();
+      if (!name) return null;
+      const serialized = {
+        name,
+        value: String(item.value ?? ""),
+        domain: String(item.domain || ".grok.com").trim() || ".grok.com",
+        path: String(item.path || "/").trim() || "/",
+        secure: item.secure !== false,
+        httpOnly: Boolean(item.httpOnly),
+      };
+      const sameSite = String(item.sameSite || "").trim();
+      if (sameSite) serialized.sameSite = sameSite;
+      if (typeof item.expires === "number" && Number.isFinite(item.expires)) {
+        serialized.expirationDate = item.expires;
+      }
+      return serialized;
+    })
+    .filter(Boolean);
+}
+
 function parseCfCookies() {
   return parseCookiesJson(CF_COOKIES_JSON);
 }
@@ -685,6 +709,7 @@ async function refreshSessionSnapshot(slot) {
     ...previous,
     sso: slot.sso || "",
     cookie_header: cookieHeader,
+    cookies: serializeCookiesForConfig(cookies),
     user_agent: ua,
     x_statsig_id: previous.x_statsig_id || statsig,
     captured_at: new Date().toISOString(),

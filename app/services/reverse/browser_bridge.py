@@ -223,6 +223,66 @@ async def _sync_cf_proxy_config(cf_context: Dict[str, Any]) -> None:
     except Exception as exc:
         logger.warning(f"Browser probe CF config sync skipped: {exc}")
 
+def _serialize_session_cookies_json(probe_data: Dict[str, Any]) -> str:
+    """将 probe 返回的 cookies 数组序列化为配置项可保存的 JSON 字符串。"""
+    cookies = probe_data.get("cookies") if isinstance(probe_data, dict) else None
+    if isinstance(cookies, list) and cookies:
+        normalized: list[dict[str, Any]] = []
+        for item in cookies:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            entry: dict[str, Any] = {
+                "name": name,
+                "value": str(item.get("value") or ""),
+                "domain": str(item.get("domain") or ".grok.com").strip() or ".grok.com",
+                "path": str(item.get("path") or "/").strip() or "/",
+                "secure": item.get("secure") is not False,
+                "httpOnly": bool(item.get("httpOnly")),
+            }
+            same_site = str(item.get("sameSite") or "").strip()
+            if same_site:
+                entry["sameSite"] = same_site
+            expires = item.get("expirationDate", item.get("expires"))
+            if isinstance(expires, (int, float)) and expires == expires:
+                entry["expirationDate"] = expires
+            normalized.append(entry)
+        if normalized:
+            return json.dumps(normalized, ensure_ascii=False, indent=2)
+
+    cookie_header = str(probe_data.get("cookie_header") or "").strip() if isinstance(probe_data, dict) else ""
+    fallback = _cookie_string_to_playwright(cookie_header)
+    if fallback:
+        return json.dumps(fallback, ensure_ascii=False, indent=2)
+    return ""
+
+
+async def _sync_session_cookies_config(probe_data: Dict[str, Any]) -> None:
+    """probe 刷新成功后，将当前浏览器会话 cookies 写回配置。"""
+    if not probe_data or not _has_captured_app_chat_headers(probe_data):
+        return
+    cookies_json = _serialize_session_cookies_json(probe_data)
+    if not cookies_json:
+        logger.warning("Browser probe session cookies config sync skipped: empty cookies payload")
+        return
+    current = str(get_config("cloakbrowser.session_cookies_json", "") or "").strip()
+    if current == cookies_json.strip():
+        logger.info("Browser probe session cookies config sync skipped: unchanged")
+        return
+    try:
+        from app.core.config import config
+
+        await config.update({"cloakbrowser": {"session_cookies_json": cookies_json}})
+        logger.info(
+            "Browser probe session cookies config synced: "
+            f"cookie_count={len(json.loads(cookies_json))}"
+        )
+    except Exception as exc:
+        logger.warning(f"Browser probe session cookies config sync skipped: {exc}")
+
+
 
 async def _prepare_cf_for_probe(*, force: bool = False) -> Dict[str, Any]:
     if not _cf_before_probe_enabled():
@@ -694,13 +754,15 @@ async def refresh_browser_probe_managed(
             bridge_running = await bridge_healthcheck()
             await _ensure_bridge_started(probe_cookies if not bridge_running else None)
             try:
-                return await asyncio.to_thread(
+                probe_data = await asyncio.to_thread(
                     refresh_browser_probe,
                     token,
                     wait,
                     reason,
                     probe_cookies=probe_cookies,
                 )
+                await _sync_session_cookies_config(probe_data)
+                return probe_data
             except UpstreamException as exc:
                 last_exc = exc
                 if (
