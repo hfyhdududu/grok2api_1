@@ -209,6 +209,15 @@ async def start(cf_cookies: list | None = None) -> None:
     env["GROK_CLOAK_PROBE_CONSUME_UPSTREAM"] = (
         "true" if bool(get_config("cloakbrowser.probe_consume_upstream", False)) else "false"
     )
+    env["GROK_CLOAK_MINIMAL_LOAD"] = (
+        "true" if bool(get_config("cloakbrowser.minimal_page_load", True)) else "false"
+    )
+    env["GROK_CLOAK_RETAIN_STATIC_CACHE"] = (
+        "true" if bool(get_config("cloakbrowser.retain_static_cache", True)) else "false"
+    )
+    env["GROK_CLOAK_CHAT_INPUT_TIMEOUT_MS"] = str(
+        int(get_config("cloakbrowser.chat_input_timeout_ms", 15000) or 15000)
+    )
 
     proxy_url = _bridge_proxy_url()
     if proxy_url:

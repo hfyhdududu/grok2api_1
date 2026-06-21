@@ -20,6 +20,12 @@ const PROXY_URL = (process.env.GROK_CLOAK_PROXY_URL || "").trim();
 const DEFAULT_USER_AGENT = (process.env.GROK_CLOAK_USER_AGENT || "").trim();
 const CF_COOKIES_JSON = (process.env.GROK_CLOAK_CF_COOKIES_JSON || "").trim();
 const CF_WAIT_TIMEOUT_MS = parseInt(process.env.GROK_CLOAK_CF_WAIT_TIMEOUT_MS || "90000", 10);
+const MINIMAL_LOAD = String(process.env.GROK_CLOAK_MINIMAL_LOAD || "true").toLowerCase() !== "false";
+const RETAIN_STATIC_CACHE = String(process.env.GROK_CLOAK_RETAIN_STATIC_CACHE || "true").toLowerCase() !== "false";
+const CHAT_INPUT_TIMEOUT_MS = parseInt(
+  process.env.GROK_CLOAK_CHAT_INPUT_TIMEOUT_MS || "15000",
+  10
+);
 
 let browser = null;
 const pages = new Map();
@@ -320,8 +326,14 @@ async function ensureBrowser() {
       "--disable-blink-features=AutomationControlled",
       "--disable-dev-shm-usage",
       "--no-sandbox",
+      "--disable-session-crashed-bubble",
+      "--hide-crash-restore-bubble",
+      "--disable-infobars",
     ],
   };
+  if (RETAIN_STATIC_CACHE) {
+    launchOptions.args.push("--disk-cache-size=536870912");
+  }
   const proxy = buildProxyOption();
   if (proxy) {
     launchOptions.proxy = proxy;
@@ -373,7 +385,9 @@ async function createContextWithCookies(playwrightBrowser, sso) {
     if (cookiesToAdd.length) {
       await playwrightBrowser.addCookies(cookiesToAdd);
     }
-    return { context: playwrightBrowser, page: await playwrightBrowser.newPage() };
+    const page = await playwrightBrowser.newPage();
+    setupPageDialogs(page);
+    return { context: playwrightBrowser, page };
   }
 
   const contextProxy = buildProxyOption();
@@ -385,20 +399,41 @@ async function createContextWithCookies(playwrightBrowser, sso) {
   if (cookiesToAdd.length) {
     await context.addCookies(cookiesToAdd);
   }
-  return { context, page: await context.newPage() };
+  const page = await context.newPage();
+  setupPageDialogs(page);
+  return { context, page };
+}
+
+function setupPageDialogs(page) {
+  page.on("dialog", async (dialog) => {
+    log(`auto-dismiss dialog type=${dialog.type()} message=${JSON.stringify(dialog.message())}`);
+    await dialog.dismiss().catch(() => {});
+  });
+}
+
+function pageHasComposerHint(page) {
+  return page.evaluate(() => {
+    const selectors = "textarea, [contenteditable], [role='textbox'], .ProseMirror";
+    if (document.querySelector(selectors)) return true;
+    const body = document.body?.innerText || "";
+    return /你想知道什么|What do you want to know|Ask Grok|Message Grok/i.test(body);
+  });
 }
 
 async function isCloudflareChallenge(page) {
   try {
+    if (await pageHasComposerHint(page)) {
+      return false;
+    }
     return await page.evaluate(() => {
       const title = document.title || "";
       const body = document.body?.innerText || "";
-      const html = document.body?.innerHTML || "";
-      return (
-        /just a moment/i.test(title) ||
-        /checking your browser/i.test(body) ||
-        /cf-browser-verification/i.test(html) ||
-        /challenge-platform/i.test(html)
+      if (/just a moment|请稍候|稍候片刻/i.test(title)) return true;
+      if (/checking your browser|verify you are human|确认您是真人/i.test(body)) return true;
+      return Boolean(
+        document.querySelector(
+          "#challenge-form, #cf-challenge-running, .cf-turnstile, iframe[src*='challenges.cloudflare.com']"
+        )
       );
     });
   } catch (_) {
@@ -406,25 +441,267 @@ async function isCloudflareChallenge(page) {
   }
 }
 
+function chatComposerLocator(page) {
+  return page.locator('[data-cloak-composer="1"]').first();
+}
+
+async function findEditableComposer(page) {
+  const marked = await page.evaluate(() => {
+    document.querySelectorAll("[data-cloak-composer]").forEach((node) => {
+      node.removeAttribute("data-cloak-composer");
+    });
+    const isVisible = (node) => {
+      const rect = node.getBoundingClientRect();
+      if (rect.width < 8 || rect.height < 8) return false;
+      const style = window.getComputedStyle(node);
+      return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity) > 0;
+    };
+    const nodes = [
+      ...document.querySelectorAll("textarea"),
+      ...document.querySelectorAll('[contenteditable="true"]'),
+      ...document.querySelectorAll(".ProseMirror"),
+      ...document.querySelectorAll('[role="textbox"][contenteditable="true"]'),
+    ];
+    for (const node of nodes) {
+      if (!isVisible(node)) continue;
+      if (node.tagName === "TEXTAREA" || node.isContentEditable || node.classList.contains("ProseMirror")) {
+        node.setAttribute("data-cloak-composer", "1");
+        return {
+          tag: node.tagName,
+          editable: node.isContentEditable,
+          className: node.className || "",
+        };
+      }
+    }
+    return null;
+  });
+  if (!marked) return null;
+  return chatComposerLocator(page);
+}
+
+async function readComposerTextFromPage(page) {
+  return page
+    .evaluate(() => {
+      const node =
+        document.querySelector('[data-cloak-composer="1"]') ||
+        document.querySelector('.ProseMirror[contenteditable="true"], .ProseMirror') ||
+        document.querySelector("textarea");
+      if (!node) return "";
+      if (typeof node.value === "string") return node.value;
+      return node.textContent || node.innerText || "";
+    })
+    .catch(() => "");
+}
+
+function probeMessageText(message) {
+  const text = String(message || "").trim();
+  return text || "hi";
+}
+
+function composerTextMatches(actual, expected) {
+  const normalizedActual = String(actual || "").trim();
+  const normalizedExpected = probeMessageText(expected);
+  if (!normalizedActual) return false;
+  return (
+    normalizedActual === normalizedExpected ||
+    normalizedActual.includes(normalizedExpected) ||
+    normalizedExpected.includes(normalizedActual)
+  );
+}
+
+async function clickComposerPlaceholder(page, label) {
+  const placeholders = [
+    page.getByPlaceholder(/你想知道|Ask|Message|询问/i).first(),
+    page.getByText("你想知道什么", { exact: false }).first(),
+    page.getByText("What do you want to know", { exact: false }).first(),
+    page.locator('[aria-label*="Message"], [aria-label*="消息"], [aria-label*="输入"]').first(),
+  ];
+  for (const locator of placeholders) {
+    try {
+      if (await locator.isVisible({ timeout: 500 }).catch(() => false)) {
+        await locator.click({ timeout: 2000 }).catch(() => {});
+        log(`${label}: clicked composer placeholder`);
+        return true;
+      }
+    } catch (_) {}
+  }
+  return false;
+}
+
+async function logPageLoadProgress(page, label) {
+  try {
+    const info = await page.evaluate(() => ({
+      href: location.href,
+      title: document.title || "",
+      editableCount: document.querySelectorAll(
+        "textarea, [contenteditable], [role='textbox'], .ProseMirror"
+      ).length,
+      spinner: Boolean(
+        document.querySelector('[class*="loading"], [class*="spinner"], [aria-busy="true"]')
+      ),
+    }));
+    log(
+      `${label}: waiting for chat composer href=${info.href} editable=${info.editableCount} spinner=${info.spinner ? "yes" : "no"} title=${JSON.stringify(info.title)}`
+    );
+  } catch (error) {
+    log(`${label}: waiting for chat composer (page state unavailable: ${error.message})`);
+  }
+}
+
+async function tryActivateChatSurface(page, label) {
+  if (await clickComposerPlaceholder(page, label)) {
+    return true;
+  }
+  const clickCandidates = [
+    page.locator('button:has-text("开始")').first(),
+    page.locator('button:has-text("Start")').first(),
+    page.locator('button:has-text("Ask")').first(),
+    page.locator('[data-testid*="composer"]').first(),
+    page.locator(".ProseMirror").first(),
+  ];
+  for (const locator of clickCandidates) {
+    try {
+      if (await locator.isVisible({ timeout: 500 }).catch(() => false)) {
+        await locator.click({ timeout: 2000 }).catch(() => {});
+        log(`${label}: activated chat surface via click`);
+        return true;
+      }
+    } catch (_) {}
+  }
+  return false;
+}
+
+async function waitForChatComposer(page, timeout = CHAT_INPUT_TIMEOUT_MS, label = "page") {
+  const deadline = Date.now() + timeout;
+  let lastProgressAt = 0;
+  while (Date.now() < deadline) {
+    await clickComposerPlaceholder(page, label).catch(() => {});
+    const input = await findEditableComposer(page);
+    if (
+      input &&
+      (await input.isVisible({ timeout: 800 }).catch(() => false)) &&
+      (await input
+        .evaluate((node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.width > 8 && rect.height > 8;
+        })
+        .catch(() => false))
+    ) {
+      log(`${label}: chat composer ready`);
+      return input;
+    }
+    const now = Date.now();
+    if (now - lastProgressAt >= 5000) {
+      await logPageLoadProgress(page, label);
+      await dismissCookieBanner(page).catch(() => {});
+      await tryActivateChatSurface(page, label);
+      lastProgressAt = now;
+    }
+    await page.waitForTimeout(500);
+  }
+  await logPageLoadProgress(page, label);
+  log(`${label}: chat composer wait failed after ${timeout}ms`);
+  return null;
+}
+
 async function waitForCloudflare(page, label = "page") {
   const deadline = Date.now() + CF_WAIT_TIMEOUT_MS;
+  let lastProgressAt = 0;
   while (Date.now() < deadline) {
     const blocked = await isCloudflareChallenge(page);
     if (!blocked) {
-      const hasInput = await page
-        .locator("textarea, [contenteditable='true']")
-        .first()
-        .isVisible({ timeout: 1500 })
-        .catch(() => false);
-      if (hasInput) {
-        log(`${label}: cloudflare challenge cleared`);
-        return true;
-      }
+      log(`${label}: cloudflare challenge cleared`);
+      return true;
+    }
+    const now = Date.now();
+    if (now - lastProgressAt >= 10000) {
+      log(`${label}: waiting for cloudflare challenge to clear...`);
+      lastProgressAt = now;
     }
     await page.waitForTimeout(1000);
   }
   log(`${label}: cloudflare wait timed out after ${CF_WAIT_TIMEOUT_MS}ms`);
   return false;
+}
+
+const MINIMAL_BLOCKED_RESOURCE_TYPES = new Set(["image", "media", "font"]);
+const MINIMAL_BLOCKED_URL_PATTERNS = [
+  /google-analytics\.com/i,
+  /googletagmanager\.com/i,
+  /segment\.io/i,
+  /sentry\.io/i,
+  /amplitude\.com/i,
+  /hotjar\.com/i,
+  /doubleclick\.net/i,
+  /facebook\.net\/tr/i,
+  /connect\.facebook\.net/i,
+  /fullstory\.com/i,
+  /clarity\.ms/i,
+  /mixpanel\.com/i,
+  /intercom\.io/i,
+  /launchdarkly\.com/i,
+  /cdn\.cookielaw\.org/i,
+  /onetrust\.com/i,
+];
+
+async function setupMinimalLoadBlocking(page) {
+  if (!MINIMAL_LOAD) return;
+  const blockStaticResources = !RETAIN_STATIC_CACHE;
+  await page.route("**/*", async (route) => {
+    const request = route.request();
+    const resourceType = request.resourceType();
+    const url = request.url();
+    if (blockStaticResources && MINIMAL_BLOCKED_RESOURCE_TYPES.has(resourceType)) {
+      await route.abort();
+      return;
+    }
+    for (const pattern of MINIMAL_BLOCKED_URL_PATTERNS) {
+      if (pattern.test(url)) {
+        await route.abort();
+        return;
+      }
+    }
+    await route.continue();
+  });
+  if (blockStaticResources) {
+    log("minimal load blocking enabled: static resources + tracking");
+  } else {
+    log("minimal load blocking enabled: tracking only, static cache retained");
+  }
+}
+
+async function waitForPageInteractive(page, label) {
+  await dismissCookieBanner(page).catch(() => {});
+
+  let input = await waitForChatComposer(page, MINIMAL_LOAD ? 8000 : 12000, label);
+  if (input) {
+    log(`${label}: page interactive via chat composer`);
+    return { cfReady: true, input };
+  }
+
+  if (await isCloudflareChallenge(page)) {
+    const cfReady = await waitForCloudflare(page, label).catch(() => false);
+    if (!cfReady && (await isCloudflareChallenge(page))) {
+      return { cfReady: false, input: null };
+    }
+  } else {
+    log(`${label}: no cloudflare challenge detected, continue waiting for composer`);
+  }
+
+  input = await waitForChatComposer(
+    page,
+    MINIMAL_LOAD ? CHAT_INPUT_TIMEOUT_MS : READY_TIMEOUT,
+    `${label}-composer`
+  );
+  if (input) {
+    return { cfReady: true, input };
+  }
+
+  if (!MINIMAL_LOAD) {
+    await page.waitForLoadState("networkidle", { timeout: READY_TIMEOUT }).catch(() => {});
+    input = await waitForChatComposer(page, READY_TIMEOUT, `${label}-after-idle`);
+  }
+  return { cfReady: Boolean(input), input };
 }
 
 async function applyProbeCookies(context, cookies) {
@@ -438,12 +715,13 @@ async function applyProbeCookies(context, cookies) {
 
 async function prepareSlot(slot) {
   const { page } = slot;
+  log("prepare-slot: navigating to Grok home");
   await page.goto(HOME_URL, {
     waitUntil: "domcontentloaded",
     timeout: NAV_TIMEOUT,
   });
-  await page.waitForLoadState("networkidle", { timeout: READY_TIMEOUT }).catch(() => {});
-  await waitForCloudflare(page, "prepare-slot").catch(() => {});
+  log("prepare-slot: domcontentloaded");
+  await waitForPageInteractive(page, "prepare-slot");
 
   const cookies = await slot.context.cookies("https://grok.com");
   const cookieSso = extractSsoFromCookies(cookies);
@@ -455,11 +733,7 @@ async function prepareSlot(slot) {
   );
   let hasUsableChat = false;
   if (!hasSession) {
-    hasUsableChat = await page
-      .locator("textarea, [contenteditable='true']")
-      .first()
-      .isVisible({ timeout: 1500 })
-      .catch(() => false);
+    hasUsableChat = Boolean(await findEditableComposer(page));
   }
   if (!hasSession && !hasUsableChat) {
     await captureDiagnostics(page, "prepare-slot-no-session");
@@ -493,8 +767,7 @@ async function navigateToUsableChat(page, label) {
     waitUntil: "domcontentloaded",
     timeout: NAV_TIMEOUT,
   });
-  await page.waitForLoadState("networkidle", { timeout: READY_TIMEOUT }).catch(() => {});
-  const cfReady = await waitForCloudflare(page, label).catch(() => false);
+  let { cfReady, input } = await waitForPageInteractive(page, label);
   if (!cfReady && (await isCloudflareChallenge(page))) {
     await captureDiagnostics(page, `${label}-cloudflare-blocked`);
     throw new BridgeError(
@@ -511,7 +784,7 @@ async function navigateToUsableChat(page, label) {
       waitUntil: "domcontentloaded",
       timeout: NAV_TIMEOUT,
     });
-    await page.waitForLoadState("networkidle", { timeout: READY_TIMEOUT }).catch(() => {});
+    ({ cfReady, input } = await waitForPageInteractive(page, `${label}-home`));
     await dismissCookieBanner(page);
   }
 
@@ -525,20 +798,29 @@ async function navigateToUsableChat(page, label) {
     try {
       if (await locator.isVisible({ timeout: 750 }).catch(() => false)) {
         await locator.click({ timeout: 2500 }).catch(() => {});
-        await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+        const afterClickTimeout = MINIMAL_LOAD ? 3000 : 5000;
+        if (MINIMAL_LOAD) {
+          input = await waitForChatComposer(page, afterClickTimeout, `${label}-new-chat`);
+        } else {
+          await page.waitForLoadState("networkidle", { timeout: afterClickTimeout }).catch(() => {});
+        }
         break;
       }
     } catch (_) {}
   }
 
-  const input = page.locator("textarea, [contenteditable='true']").first();
-  try {
-    await input.waitFor({ state: "visible", timeout: READY_TIMEOUT });
-    return input;
-  } catch (error) {
-    await captureDiagnostics(page, `${label}-no-input`);
-    throw new BridgeError("input_unavailable", `Chat input not available for ${label}: ${error.message}`, 502);
+  if (!input) {
+    input = await waitForChatComposer(
+      page,
+      MINIMAL_LOAD ? CHAT_INPUT_TIMEOUT_MS : READY_TIMEOUT,
+      label
+    );
   }
+  if (!input) {
+    await captureDiagnostics(page, `${label}-no-input`);
+    throw new BridgeError("input_unavailable", `Chat input not available for ${label}`, 502);
+  }
+  return input;
 }
 
 
@@ -546,11 +828,14 @@ async function prepareUsableChat(page, label, options = {}) {
   const skipInitialGoto = options.skipInitialGoto === true;
   if (skipInitialGoto) {
     await dismissCookieBanner(page).catch(() => {});
-    const quickInput = page.locator("textarea, [contenteditable='true']").first();
-    if (await quickInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+    const quickInput = await findEditableComposer(page);
+    if (quickInput && (await quickInput.isVisible({ timeout: 2000 }).catch(() => false))) {
       log(`${label}: reusing prepared Grok home page, skip second goto`);
       try {
-        await quickInput.waitFor({ state: "visible", timeout: READY_TIMEOUT });
+        await quickInput.waitFor({
+          state: "visible",
+          timeout: MINIMAL_LOAD ? CHAT_INPUT_TIMEOUT_MS : READY_TIMEOUT,
+        });
         return quickInput;
       } catch (error) {
         log(`${label}: prepared page input wait failed, fallback to full navigation`);
@@ -576,55 +861,78 @@ async function readComposerText(input) {
   }
 }
 
-async function fillComposerWithProbe(page, input, message, label) {
-  await input.click({ timeout: 5000 }).catch(async () => {
-    await input.click({ timeout: 5000, force: true });
-  });
-
-  try {
-    await input.fill("");
-  } catch (_) {}
+async function setComposerText(page, input, message) {
+  const text = probeMessageText(message);
+  await clickComposerPlaceholder(page, "setComposerText").catch(() => {});
+  let editable = (await findEditableComposer(page)) || input;
+  await editable.scrollIntoViewIfNeeded().catch(() => {});
+  await editable.click({ timeout: 5000, force: true }).catch(() => {});
+  await page.waitForTimeout(200);
   await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
   await page.keyboard.press("Backspace").catch(() => {});
-  await page.keyboard.type(String(message || ""), { delay: 5 });
+  await page.keyboard.insertText(text).catch(async () => {
+    await page.keyboard.type(text, { delay: 10 });
+  });
+  await page
+    .evaluate((value) => {
+      const node =
+        document.querySelector('[data-cloak-composer="1"]') ||
+        document.querySelector('.ProseMirror[contenteditable="true"], .ProseMirror') ||
+        document.querySelector("textarea");
+      if (!node) return;
+      node.focus();
+      if (typeof node.value === "string") {
+        node.value = value;
+        node.dispatchEvent(new Event("input", { bubbles: true }));
+        node.dispatchEvent(new Event("change", { bubbles: true }));
+        return;
+      }
+      if (node.isContentEditable && !String(node.textContent || "").trim()) {
+        node.textContent = value;
+        node.dispatchEvent(
+          new InputEvent("input", { bubbles: true, data: value, inputType: "insertText" })
+        );
+      }
+    }, text)
+    .catch(() => {});
+}
 
-  let actual = (await readComposerText(input)).trim();
-  if (actual === String(message || "").trim()) {
+async function fillComposerWithProbe(page, input, message, label) {
+  const expected = probeMessageText(message);
+  await setComposerText(page, input, expected);
+
+  let actual = String(await readComposerTextFromPage(page)).trim();
+  if (composerTextMatches(actual, expected)) {
     log(`${label}: probe message filled and verified on first attempt`);
     return true;
   }
 
   log(
-    `${label}: probe message verify failed on first attempt expected=${JSON.stringify(
-      String(message || "")
-    )} actual=${JSON.stringify(actual)}`
+    `${label}: probe message verify failed on first attempt expected_len=${expected.length} actual=${JSON.stringify(actual)}`
   );
 
-  try {
-    await input.fill(String(message || ""));
-  } catch (_) {
-    await input.click({ timeout: 5000, force: true }).catch(() => {});
-    await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
-    await page.keyboard.type(String(message || ""), { delay: 20 }).catch(() => {});
-  }
-
-  actual = (await readComposerText(input)).trim();
-  if (actual === String(message || "").trim()) {
+  await clickComposerPlaceholder(page, `${label}-refocus`).catch(() => {});
+  const editable = (await findEditableComposer(page)) || input;
+  await setComposerText(page, editable, expected);
+  actual = String(await readComposerTextFromPage(page)).trim();
+  if (composerTextMatches(actual, expected)) {
     log(`${label}: probe message filled and verified on second attempt`);
     return true;
   }
 
   log(
-    `${label}: probe message verify failed on second attempt expected=${JSON.stringify(
-      String(message || "")
-    )} actual=${JSON.stringify(actual)}`
+    `${label}: probe message verify failed on second attempt expected_len=${expected.length} actual=${JSON.stringify(actual)}`
   );
   return false;
 }
 
 async function submitProbeFromReadyPage(page, input, label) {
+  const editable = (await findEditableComposer(page)) || input;
+  await editable.click({ timeout: 3000, force: true }).catch(() => {});
   const sendBtn = page
-    .locator('button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"]')
+    .locator(
+      'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"], button[aria-label*="发送"]'
+    )
     .first();
 
   const requestPromise = page.waitForRequest(
@@ -632,15 +940,15 @@ async function submitProbeFromReadyPage(page, input, label) {
     { timeout: 8000 }
   );
   const clearedPromise = page
-    .waitForFunction(
-      (node) => {
-        if (!node) return false;
-        const value = typeof node.value === "string" ? node.value : node.textContent || node.innerText || "";
-        return !String(value || "").trim();
-      },
-      await input.elementHandle(),
-      { timeout: 8000 }
-    )
+    .waitForFunction(() => {
+      const node =
+        document.querySelector('[data-cloak-composer="1"]') ||
+        document.querySelector('.ProseMirror[contenteditable="true"], .ProseMirror') ||
+        document.querySelector("textarea");
+      if (!node) return false;
+      const value = typeof node.value === "string" ? node.value : node.textContent || node.innerText || "";
+      return !String(value || "").trim();
+    }, { timeout: 8000 })
     .catch(() => null);
 
   if (await sendBtn.isVisible().catch(() => false)) {
@@ -821,6 +1129,7 @@ async function getSlot(sso) {
     busy: false,
     lastUsed: Date.now(),
   };
+  await setupMinimalLoadBlocking(page);
   const rewriteProbeRoute = async (route) => {
     const request = route.request();
     if (!slot.probeActive || request.method() !== "POST") {
@@ -989,8 +1298,21 @@ async function probeAppChatHeaders(slot, force = false, credentials = {}) {
   const { page, context } = slot;
   const freshCookies = Array.isArray(credentials.cookies) ? credentials.cookies : [];
   const injectedFreshCookies = await applyProbeCookies(context, freshCookies);
-  let input = await prepareUsableChat(page, "probe", { skipInitialGoto: !injectedFreshCookies });
-  let attemptedReuse = !injectedFreshCookies;
+  let skipInitialGoto = slot.ready && !injectedFreshCookies;
+  if (injectedFreshCookies) {
+    if (slot.ready) {
+      log("probe: cookies injected on prepared page, skip reload");
+      skipInitialGoto = true;
+    } else {
+      log("probe: reloading page after cookie inject");
+      await page.reload({ waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
+      await dismissCookieBanner(page).catch(() => {});
+      await waitForPageInteractive(page, "probe-after-cookies");
+      skipInitialGoto = true;
+    }
+  }
+  let input = await prepareUsableChat(page, "probe", { skipInitialGoto });
+  let attemptedReuse = skipInitialGoto;
 
   while (true) {
     await enableTemporaryMode(page, true);
@@ -1011,15 +1333,10 @@ async function probeAppChatHeaders(slot, force = false, credentials = {}) {
     slot.probeActive = true;
 
     try {
+      input = (await findEditableComposer(page)) || input;
       const filled = await fillComposerWithProbe(page, input, PROBE_MESSAGE, "probe");
       if (!filled) {
-        if (attemptedReuse) {
-          log("probe: prepared page composer state is unstable, fallback to full navigation");
-          input = await navigateToUsableChat(page, "probe-fallback");
-          attemptedReuse = false;
-          continue;
-        }
-        throw new BridgeError("probe_input_unstable", "Probe composer did not accept full message", 502);
+        log("probe: composer fill unverified, attempting submit anyway");
       }
 
       const submitted = await submitProbeFromReadyPage(page, input, "probe");
@@ -1029,6 +1346,9 @@ async function probeAppChatHeaders(slot, force = false, credentials = {}) {
           input = await navigateToUsableChat(page, "probe-fallback");
           attemptedReuse = false;
           continue;
+        }
+        if (!filled) {
+          throw new BridgeError("probe_input_unstable", "Probe composer did not accept full message", 502);
         }
         throw new BridgeError("probe_submit_unavailable", "Probe submit action did not trigger request", 502);
       }
@@ -1228,5 +1548,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  log(`listening on ${HOST}:${PORT}`);
+  log(
+    `listening on ${HOST}:${PORT} minimal_load=${MINIMAL_LOAD ? "yes" : "no"} retain_static_cache=${RETAIN_STATIC_CACHE ? "yes" : "no"} chat_input_timeout_ms=${CHAT_INPUT_TIMEOUT_MS}`
+  );
 });

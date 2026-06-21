@@ -702,6 +702,11 @@ def refresh_browser_probe(
         return {}
     try:
         try:
+            logger.info(
+                "Browser probe bridge /api/probe request started: "
+                f"reason={reason}, sso={'yes' if sso else 'no'}, "
+                f"force=yes, cookies={len(probe_cookies or [])}"
+            )
             probe_data = _probe_request_sync(sso, force=True, probe_cookies=probe_cookies)
         except UpstreamException as exc:
             if str((exc.details or {}).get("bridge_code") or "") == "cloudflare_blocked":

@@ -229,7 +229,10 @@ const LOCALE_MAP = {
     "probe_message": { title: "Probe 文本", desc: "触发真实浏览器 app-chat 请求时发送的探针文本。" },
     "use_system_proxy": { title: "复用系统代理", desc: "让 CloakBrowser 与 FlareSolverr 使用相同的 proxy.base_proxy_url 出口，保证 cf_clearance 与浏览器 IP 一致。" },
     "cf_before_probe": { title: "Probe 前按需刷新 CF", desc: "仅在 cf_clearance 缺失、过期或上次 probe 因 CF 失败时，才通过 FlareSolverr 刷新并注入浏览器。" },
-    "keep_bridge_alive": { title: "Bridge 常驻", desc: "probe 完成后保持 CloakBrowser Bridge 进程运行，复用已过 CF 的页面与 profile。" }
+    "keep_bridge_alive": { title: "Bridge 常驻", desc: "probe 完成后保持 CloakBrowser Bridge 进程运行，复用已过 CF 的页面与 profile。" },
+    "minimal_page_load": { title: "最少加载", desc: "不等页面全部资源加载完成，只等待聊天输入框出现；并拦截统计脚本等，避免转圈导致 xid probe 超时。" },
+    "retain_static_cache": { title: "保留静态资源缓存", desc: "开启后图片/字体/样式等会正常加载并写入浏览器 profile 磁盘缓存，二次 probe 更快。关闭则 abort 静态资源以进一步减负。" },
+    "chat_input_timeout_ms": { title: "输入框等待超时（毫秒）", desc: "最少加载模式下等待聊天输入框出现的超时时间。默认 15000。" }
   }
 };
 
@@ -266,7 +269,8 @@ const HIDDEN_CONFIG_KEYS = new Map([
     'node_binary',
     'executable_path',
     'profile_dir',
-    'manual_statsig_id'
+    'manual_statsig_id',
+    'chat_input_timeout_ms'
   ])],
 ]);
 

@@ -210,6 +210,12 @@ use_system_proxy = true
 cf_before_probe = true
 # probe / 刷新完成后是否保持 Bridge 进程常驻
 keep_bridge_alive = true
+# 最少加载模式：不等 networkidle，只等聊天输入框；并拦截统计等非必要请求
+minimal_page_load = true
+# 保留静态资源磁盘缓存（图片/字体/样式等写入 profile，二次打开更快）；开启后不再 abort 静态资源
+retain_static_cache = true
+# 最少加载模式下等待聊天输入框的超时（毫秒）
+chat_input_timeout_ms = 15000
 
 # ==================== 图像配置 ====================
 [image]
