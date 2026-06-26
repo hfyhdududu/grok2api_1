@@ -33,16 +33,34 @@ def _clear_log_dir() -> dict:
     deleted_files = 0
     deleted_dirs = 0
     released_bytes = 0
+    skipped_files: list[str] = []
+
+    def _try_remove_file(target: Path) -> None:
+        nonlocal deleted_files, released_bytes
+        try:
+            released_bytes += target.stat().st_size
+        except OSError:
+            pass
+        try:
+            target.unlink(missing_ok=True)
+            deleted_files += 1
+        except OSError as exc:
+            # Windows 下 bridge 进程常占用 cloakbrowser_bridge.log，删除失败时尝试截断
+            if getattr(exc, "winerror", None) == 32 or exc.errno in (13, 32):
+                try:
+                    with target.open("w", encoding="utf-8"):
+                        pass
+                    deleted_files += 1
+                    return
+                except OSError:
+                    skipped_files.append(str(target.name))
+                    return
+            raise
 
     for child in log_dir.iterdir():
         try:
             if child.is_file() or child.is_symlink():
-                try:
-                    released_bytes += child.stat().st_size
-                except OSError:
-                    pass
-                child.unlink(missing_ok=True)
-                deleted_files += 1
+                _try_remove_file(child)
                 continue
             if child.is_dir():
                 for nested in child.rglob("*"):
@@ -61,6 +79,7 @@ def _clear_log_dir() -> dict:
         "deleted_files": deleted_files,
         "deleted_dirs": deleted_dirs,
         "released_bytes": released_bytes,
+        "skipped_files": skipped_files,
     }
 
 

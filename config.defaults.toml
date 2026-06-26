@@ -150,6 +150,7 @@ chat_first = true
 sync_session = false
 # 启动时是否预热浏览器会话
 prewarm_on_start = false
+# 开启后即使已有 probe 缓存也会启动时打开浏览器并执行 probe 预热（忽略缓存跳过）
 # 预热是否阻塞应用启动完成；session 模式只访问官网，不发送对话
 prewarm_blocking = false
 # 预热模式：session=仅访问官网同步 cookie/UA；probe=发送一次探针捕获完整 chat headers

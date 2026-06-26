@@ -847,6 +847,86 @@ async function prepareUsableChat(page, label, options = {}) {
   return navigateToUsableChat(page, label);
 }
 
+
+function composerSendButtonLocator(page) {
+  return page
+    .locator(
+      'button[type="submit"]:not([disabled]), button[aria-label*="Send"]:not([disabled]), button[aria-label*="send"]:not([disabled]), button[aria-label*="发送"]:not([disabled]), button[data-testid*="send"]:not([disabled])'
+    )
+    .last();
+}
+
+async function waitForComposerSendReady(page, label, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const ready = await page
+      .evaluate(() => {
+        const node =
+          document.querySelector('[data-cloak-composer="1"]') ||
+          document.querySelector('.ProseMirror[contenteditable="true"], .ProseMirror') ||
+          document.querySelector("textarea");
+        const text =
+          node && typeof node.value === "string"
+            ? node.value
+            : node
+              ? node.textContent || node.innerText || ""
+              : "";
+        if (!String(text || "").trim()) return false;
+        const buttons = [
+          ...document.querySelectorAll(
+            'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"], button[aria-label*="发送"], button[data-testid*="send"]'
+          ),
+        ];
+        return buttons.some((button) => {
+          if (button.disabled) return false;
+          const rect = button.getBoundingClientRect();
+          return rect.width > 8 && rect.height > 8;
+        });
+      })
+      .catch(() => false);
+    if (ready) {
+      log(`${label}: composer send action ready`);
+      return true;
+    }
+    await page.waitForTimeout(200);
+  }
+  log(`${label}: composer send action not ready after ${timeoutMs}ms`);
+  return false;
+}
+
+async function clearComposerText(editable) {
+  await editable.click({ timeout: 5000, force: true }).catch(() => {});
+  await editable
+    .press(process.platform === "darwin" ? "Meta+A" : "Control+A")
+    .catch(() => {});
+  await editable.press("Backspace").catch(() => {});
+}
+
+async function typeComposerText(page, editable, text) {
+  const composerKind = await editable
+    .evaluate((node) => ({
+      tag: node?.tagName || "",
+      editable: Boolean(node?.isContentEditable),
+      proseMirror: Boolean(node?.classList?.contains("ProseMirror")),
+    }))
+    .catch(() => ({ tag: "", editable: false, proseMirror: false }));
+
+  if (composerKind.tag === "TEXTAREA" && !composerKind.editable) {
+    await editable.fill(text).catch(async () => {
+      await clearComposerText(editable);
+      await editable.pressSequentially(text, { delay: 12 });
+    });
+    return;
+  }
+
+  await clearComposerText(editable);
+  await editable.pressSequentially(text, { delay: 12 }).catch(async () => {
+    await page.keyboard.insertText(text).catch(async () => {
+      await page.keyboard.type(text, { delay: 10 });
+    });
+  });
+}
+
 async function readComposerText(input) {
   try {
     return await input.evaluate((node) => {
@@ -866,35 +946,9 @@ async function setComposerText(page, input, message) {
   await clickComposerPlaceholder(page, "setComposerText").catch(() => {});
   let editable = (await findEditableComposer(page)) || input;
   await editable.scrollIntoViewIfNeeded().catch(() => {});
-  await editable.click({ timeout: 5000, force: true }).catch(() => {});
-  await page.waitForTimeout(200);
-  await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
-  await page.keyboard.press("Backspace").catch(() => {});
-  await page.keyboard.insertText(text).catch(async () => {
-    await page.keyboard.type(text, { delay: 10 });
-  });
-  await page
-    .evaluate((value) => {
-      const node =
-        document.querySelector('[data-cloak-composer="1"]') ||
-        document.querySelector('.ProseMirror[contenteditable="true"], .ProseMirror') ||
-        document.querySelector("textarea");
-      if (!node) return;
-      node.focus();
-      if (typeof node.value === "string") {
-        node.value = value;
-        node.dispatchEvent(new Event("input", { bubbles: true }));
-        node.dispatchEvent(new Event("change", { bubbles: true }));
-        return;
-      }
-      if (node.isContentEditable && !String(node.textContent || "").trim()) {
-        node.textContent = value;
-        node.dispatchEvent(
-          new InputEvent("input", { bubbles: true, data: value, inputType: "insertText" })
-        );
-      }
-    }, text)
-    .catch(() => {});
+  await typeComposerText(page, editable, text);
+  await page.waitForTimeout(150);
+  await waitForComposerSendReady(page, "setComposerText", 4000).catch(() => false);
 }
 
 async function fillComposerWithProbe(page, input, message, label) {
@@ -926,14 +980,44 @@ async function fillComposerWithProbe(page, input, message, label) {
   return false;
 }
 
+
+async function clearComposerAfterProbe(page, label) {
+  const editable = await findEditableComposer(page);
+  if (!editable) {
+    await page
+      .evaluate(() => {
+        const node =
+          document.querySelector('[data-cloak-composer="1"]') ||
+          document.querySelector('.ProseMirror[contenteditable="true"], .ProseMirror') ||
+          document.querySelector("textarea");
+        if (!node) return;
+        if (typeof node.value === "string") {
+          node.value = "";
+          node.dispatchEvent(new Event("input", { bubbles: true }));
+          node.dispatchEvent(new Event("change", { bubbles: true }));
+          return;
+        }
+        node.textContent = "";
+        node.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+      })
+      .catch(() => {});
+    log(`${label}: cleared composer via dom fallback`);
+    return;
+  }
+  await clearComposerText(editable);
+  const remaining = String(await readComposerTextFromPage(page)).trim();
+  if (remaining) {
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+    await page.keyboard.press("Backspace").catch(() => {});
+  }
+  log(`${label}: cleared composer after probe`);
+}
+
 async function submitProbeFromReadyPage(page, input, label) {
   const editable = (await findEditableComposer(page)) || input;
   await editable.click({ timeout: 3000, force: true }).catch(() => {});
-  const sendBtn = page
-    .locator(
-      'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"], button[aria-label*="发送"]'
-    )
-    .first();
+  await waitForComposerSendReady(page, label, 6000).catch(() => false);
+  const sendBtn = composerSendButtonLocator(page);
 
   const requestPromise = page.waitForRequest(
     (request) => isConversationSubmitUrl(request.url()) && request.method() === "POST",
@@ -951,26 +1035,34 @@ async function submitProbeFromReadyPage(page, input, label) {
     }, { timeout: 8000 })
     .catch(() => null);
 
-  if (await sendBtn.isVisible().catch(() => false)) {
-    await sendBtn.click({ timeout: 5000 }).catch(async () => {
+  const sendStrategies = [
+    async () => {
+      if (!(await sendBtn.isVisible().catch(() => false))) return false;
+      await sendBtn.click({ timeout: 5000 });
+      return true;
+    },
+    async () => {
+      await editable.press("Enter");
+      return true;
+    },
+    async () => {
       await page.keyboard.press("Enter");
-    });
-  } else {
-    await page.keyboard.press("Enter");
-  }
+      return true;
+    },
+  ];
 
-  const requestMatched = await requestPromise
-    .then(() => true)
-    .catch(() => false);
-  const composerCleared = (await clearedPromise) !== null;
-
-  if (requestMatched) {
-    log(`${label}: probe submit triggered request`);
-    return true;
-  }
-  if (composerCleared) {
-    log(`${label}: probe submit cleared composer without captured request`);
-    return true;
+  for (const strategy of sendStrategies) {
+    try {
+      await strategy();
+      const requestMatched = await requestPromise.then(() => true).catch(() => false);
+      const composerCleared = (await clearedPromise) !== null;
+      if (requestMatched || composerCleared) {
+        log(
+          `${label}: probe submit ${requestMatched ? "triggered request" : "cleared composer without captured request"}`
+        );
+        return true;
+      }
+    } catch (_) {}
   }
 
   log(`${label}: probe submit did not trigger request or clear composer`);
@@ -1224,15 +1316,8 @@ async function submitThroughUi(slot, payload, conversationId) {
 
   const input = await navigateToUsableChat(page, "submit");
   await enableTemporaryMode(page, payload.temporary === true);
-  await input.click({ timeout: 5000 });
-
-  try {
-    await input.fill("");
-  } catch (_) {}
-
-  await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
-  await page.keyboard.press("Backspace").catch(() => {});
-  await page.keyboard.type(String(message || ""), { delay: 10 });
+  await typeComposerText(page, input, String(message || ""));
+  await waitForComposerSendReady(page, "submit", 6000).catch(() => false);
 
   const sendStartedAt = Date.now();
   const responsePromise = page.waitForResponse(
@@ -1245,16 +1330,14 @@ async function submitThroughUi(slot, payload, conversationId) {
     { timeout: REQUEST_TIMEOUT }
   );
 
-  const sendBtn = page
-    .locator('button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"]')
-    .first();
+  const sendBtn = composerSendButtonLocator(page);
 
   if (await sendBtn.isVisible().catch(() => false)) {
     await sendBtn.click({ timeout: 5000 }).catch(async () => {
-      await page.keyboard.press("Enter");
+      await input.press("Enter");
     });
   } else {
-    await page.keyboard.press("Enter");
+    await input.press("Enter");
   }
 
   const response = await responsePromise;
@@ -1355,6 +1438,9 @@ async function probeAppChatHeaders(slot, force = false, credentials = {}) {
 
       await waitForCapturedHeaders(slot.sso, 5000);
       await refreshSessionSnapshot(slot).catch(() => {});
+      if (!PROBE_CONSUME_UPSTREAM) {
+        await clearComposerAfterProbe(page, "probe").catch(() => {});
+      }
       break;
     } finally {
       slot.probeActive = false;

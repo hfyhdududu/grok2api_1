@@ -834,12 +834,17 @@ async def prewarm_browser_sessions() -> None:
         return
     if not get_config("cloakbrowser.prewarm_on_start", True):
         return
+
     if _has_reusable_probe_source():
-        logger.info("Browser session prewarm skipped: existing manual statsig or reusable probe cache found")
-        return
+        logger.info(
+            "Browser session prewarm: prewarm_on_start enabled, "
+            "ignore reusable probe cache and open browser on startup"
+        )
 
     mode = str(get_config("cloakbrowser.prewarm_mode", "session") or "session").strip().lower()
-    if mode == "probe" and _global_probe_enabled():
+    # 启动预热开启时，即使 prewarm_mode=session 也执行 probe，确保拉起可见浏览器并刷新 x-statsig-id
+    run_probe_prewarm = _global_probe_enabled()
+    if run_probe_prewarm:
         logger.info("Browser session prewarm started: mode=probe, strategy=single_global_probe")
         try:
             if get_config("cloakbrowser.profile_session", True):
