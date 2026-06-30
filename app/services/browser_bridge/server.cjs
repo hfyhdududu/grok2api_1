@@ -314,7 +314,10 @@ async function captureDiagnostics(page, label) {
 async function ensureBrowser() {
   if (browser) {
     if (typeof browser.isConnected === "function") {
-      if (browser.isConnected()) return browser;
+      if (browser.isConnected()) {
+        return browser;
+      }
+      resetBrowserStateAfterClose("browser disconnected");
     } else {
       return browser;
     }
@@ -1177,6 +1180,26 @@ async function enableTemporaryMode(page, desiredTemporary) {
   return false;
 }
 
+
+async function isSlotPageAlive(slot) {
+  if (!slot?.page) return false;
+  try {
+    if (typeof slot.page.isClosed === "function" && slot.page.isClosed()) {
+      return false;
+    }
+    await slot.page.evaluate(() => true, { timeout: 3000 });
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function resetBrowserStateAfterClose(reason) {
+  log(`browser state reset: ${reason}`);
+  browser = null;
+  pages.clear();
+}
+
 async function destroySlot(key) {
   const slot = pages.get(key);
   if (!slot) return;
@@ -1194,8 +1217,14 @@ async function getSlot(sso) {
   const key = sso || PROFILE_SLOT_KEY;
   let slot = pages.get(key);
   if (slot && slot.ready && !slot.busy) {
-    slot.lastUsed = Date.now();
-    return slot;
+    if (await isSlotPageAlive(slot)) {
+      slot.lastUsed = Date.now();
+      return slot;
+    }
+    log(`slot ${key} is stale after manual browser close, recreating`);
+    slot.ready = false;
+    await destroySlot(key);
+    slot = null;
   }
   if (slot) {
     await destroySlot(key);
