@@ -106,6 +106,24 @@ def _manual_statsig_configured() -> bool:
     return bool(str(get_config("cloakbrowser.manual_statsig_id", "") or "").strip())
 
 
+
+async def _clear_manual_statsig_if_browser_captured(probe_data: Dict[str, Any]) -> None:
+    """浏览器抓到有效 x-statsig-id 时，清空手动值，让捕获结果成为生效来源。"""
+    if not probe_data or not _has_captured_app_chat_headers(probe_data):
+        return
+    if not _manual_statsig_configured():
+        return
+    try:
+        from app.core.config import config
+
+        await config.update({"cloakbrowser": {"manual_statsig_id": ""}})
+        logger.info(
+            "Browser probe captured valid x-statsig-id; manual_statsig_id cleared to use browser value"
+        )
+    except Exception as exc:
+        logger.warning(f"Clear manual_statsig_id after browser capture failed: {exc}")
+
+
 def _has_reusable_probe_source() -> bool:
     if _manual_statsig_configured():
         return True
@@ -445,6 +463,36 @@ def _session_request_sync(sso: str = "") -> Dict[str, Any]:
         ) from exc
 
 
+
+def _probe_request_sync_with_retry(
+    sso: str = "",
+    force: bool = False,
+    *,
+    probe_cookies: list | None = None,
+    max_attempts: int = 8,
+) -> Dict[str, Any]:
+    """probe 可能与上一轮刷新或 chat 争用同一 page，遇到 page_busy 时短暂排队重试。"""
+    last_exc: UpstreamException | None = None
+    for attempt in range(max_attempts):
+        try:
+            return _probe_request_sync(sso, force, probe_cookies=probe_cookies)
+        except UpstreamException as exc:
+            last_exc = exc
+            code = str((exc.details or {}).get("bridge_code") or "")
+            status = int((exc.details or {}).get("status") or exc.status_code or 0)
+            if code == "page_busy" or status == 429:
+                wait_s = min(2.0 + attempt * 0.75, 8.0)
+                logger.info(
+                    f"Browser probe bridge busy, retry {attempt + 1}/{max_attempts} after {wait_s:.1f}s"
+                )
+                time.sleep(wait_s)
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    return {}
+
+
 def _probe_request_sync(
     sso: str = "",
     force: bool = False,
@@ -707,7 +755,7 @@ def refresh_browser_probe(
                 f"reason={reason}, sso={'yes' if sso else 'no'}, "
                 f"force=yes, cookies={len(probe_cookies or [])}"
             )
-            probe_data = _probe_request_sync(sso, force=True, probe_cookies=probe_cookies)
+            probe_data = _probe_request_sync_with_retry(sso, force=True, probe_cookies=probe_cookies)
         except UpstreamException as exc:
             if str((exc.details or {}).get("bridge_code") or "") == "cloudflare_blocked":
                 _mark_probe_cf_failure()
@@ -767,6 +815,7 @@ async def refresh_browser_probe_managed(
                     probe_cookies=probe_cookies,
                 )
                 await _sync_session_cookies_config(probe_data)
+                await _clear_manual_statsig_if_browser_captured(probe_data)
                 return probe_data
             except UpstreamException as exc:
                 last_exc = exc

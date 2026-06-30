@@ -1,5 +1,6 @@
 import os
 import shutil
+import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -24,6 +25,9 @@ from app.services.reverse.browser_bridge import (
 )
 
 router = APIRouter()
+
+
+_statsig_manual_refresh_lock = asyncio.Lock()
 
 
 def _clear_log_dir() -> dict:
@@ -160,6 +164,11 @@ def _current_statsig_payload() -> dict:
         "x_statsig_id": statsig,
         "manual_statsig_id": manual_statsig,
         "effective_statsig_id": manual_statsig or statsig,
+        "source": (
+            "manual"
+            if manual_statsig
+            else ("browser" if statsig else "none")
+        ),
         "captured_at": (session_data or {}).get("captured_at") or (probe_data or {}).get("captured_at") or "",
         "user_agent": (session_data or {}).get("user_agent") or (probe_data or {}).get("user_agent") or "",
         "header_keys": sorted(request_headers.keys()) if request_headers else [],
@@ -185,8 +194,14 @@ async def refresh_statsig():
     """手动刷新浏览器探针并获取新的 x-statsig-id。"""
     if not browser_bridge_enabled():
         raise HTTPException(status_code=400, detail="CloakBrowser bridge 未启用")
+    if _statsig_manual_refresh_lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="已有 x-statsig-id 刷新任务进行中，请等待完成后再试",
+        )
     try:
-        await refresh_browser_probe_managed("", True, reason="manual")
+        async with _statsig_manual_refresh_lock:
+            await refresh_browser_probe_managed("", True, reason="manual")
         return {
             "status": "success",
             "message": "x-statsig-id 已刷新",

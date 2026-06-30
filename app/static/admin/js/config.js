@@ -4,6 +4,7 @@ let modelRoutingMeta = { models: [], pools: ['ssoBasic', 'ssoSuper', 'ssoHeavy']
 let modelRoutingAssignments = {};
 let modelRoutingDragId = '';
 let currentConfigTab = 'runtime';
+let statsigRefreshInFlight = false;
 let currentStatsigInfo = {
   enabled: false,
   x_statsig_id: '',
@@ -217,7 +218,7 @@ const LOCALE_MAP = {
     "sync_session": { title: "同步真实会话", desc: "启用后将浏览器抓到的 Cookie、UA 和请求头同步给 HTTP reverse。默认关闭，优先使用上游动态 Statsig 方案。" },
     "profile_session": { title: "复用浏览器 Profile", desc: "允许直接使用浏览器 profile 中已登录的 Grok 会话。" },
     "session_cookies_json": { title: "会话 Cookies JSON", desc: "可粘贴完整浏览器 Cookie 数组。Docker 或独立浏览器环境推荐使用，用于注入已登录 Grok 会话。" },
-    "manual_statsig_id": { title: "手动 Statsig", desc: "可手动填入一个长期有效的 x-statsig-id。填入后优先于浏览器自动捕获值。" },
+    "manual_statsig_id": { title: "手动 Statsig", desc: "可临时手填 x-statsig-id；浏览器成功捕获有效值后会自动清空手动值并改用捕获结果。" },
     "prewarm_on_start": { title: "启动预热", desc: "服务启动时自动准备浏览器会话与 probe。默认关闭，避免无必要拉起浏览器。" },
     "prewarm_blocking": { title: "阻塞预热", desc: "启用后应用启动完成前会等待浏览器预热结束。通常不建议开启。" },
     "prewarm_mode": { title: "预热模式", desc: "session 只同步会话，probe 还会抓一份可复用的真实 chat headers。" },
@@ -666,7 +667,10 @@ async function manualRefreshCfClearance() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+      if (res.status === 409) {
+      throw new Error(data.detail || data.message || '已有刷新任务进行中');
+    }
+    throw new Error(data.detail || data.message || `HTTP ${res.status}`);
     }
     showToast(data.message || 'CF Clearance 已刷新', 'success');
     await loadData();
@@ -721,7 +725,7 @@ function buildStatsigPanel() {
   const capturedAt = formatLocalDateTime(currentStatsigInfo.captured_at);
   const headerCount = Array.isArray(currentStatsigInfo.header_keys) ? currentStatsigInfo.header_keys.length : 0;
   [
-    { label: '当前来源', value: currentStatsigInfo.manual_statsig_id ? '手动填写' : (currentStatsigInfo.effective_statsig_id ? '浏览器捕获' : '未生效') },
+    { label: '当前来源', value: currentStatsigInfo.source === 'manual' ? '手动填写' : (currentStatsigInfo.source === 'browser' ? '浏览器捕获' : '未生效') },
     { label: '最近捕获时间', value: capturedAt },
     { label: '捕获 Header 数量', value: String(headerCount) }
   ].forEach(item => {
@@ -754,7 +758,7 @@ function buildStatsigPanel() {
   manualInput.className = 'geist-input font-mono text-xs min-h-[90px]';
   manualInput.readOnly = false;
   manualInput.value = currentStatsigInfo.manual_statsig_id || '';
-  manualInput.placeholder = '留空表示使用浏览器自动捕获值；填入后将优先生效';
+  manualInput.placeholder = '留空则使用浏览器捕获值；保存后立即覆盖当前生效值';
 
   const actionRow = document.createElement('div');
   actionRow.className = 'flex flex-col gap-2 md:flex-row';
@@ -779,7 +783,7 @@ function buildStatsigPanel() {
   const meta = document.createElement('div');
   meta.className = 'text-xs text-[var(--accents-4)] flex flex-col gap-1';
   meta.innerHTML = `
-    <div>来源优先级：手动填写 > 浏览器捕获 > 程序动态生成</div>
+    <div>来源优先级：手动填写（保存后）> 浏览器捕获 > 程序动态生成；浏览器刷新捕获成功后会清空手动值并改用捕获结果。</div>
     <div>建议：优先长期复用一份稳定值，只有出现 403 或确认失效后再刷新。</div>
   `;
 
@@ -798,6 +802,11 @@ async function manualRefreshStatsig() {
   const btn = byId('statsig-refresh-btn');
   const input = byId('statsig-value');
   if (!btn) return;
+  if (statsigRefreshInFlight) {
+    showToast('已有刷新任务进行中，请稍候', 'warning');
+    return;
+  }
+  statsigRefreshInFlight = true;
   const originalHtml = btn.innerHTML;
   btn.disabled = true;
   btn.innerHTML = `
@@ -813,6 +822,9 @@ async function manualRefreshStatsig() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
+      if (res.status === 409) {
+        throw new Error(data.detail || data.message || '已有刷新任务进行中，请稍候');
+      }
       throw new Error(data.detail || data.message || `HTTP ${res.status}`);
     }
     currentStatsigInfo = data && data.data ? data.data : currentStatsigInfo;
@@ -824,6 +836,7 @@ async function manualRefreshStatsig() {
   } catch (e) {
     showToast(`刷新失败: ${e.message || e}`, 'error');
   } finally {
+    statsigRefreshInFlight = false;
     btn.disabled = !currentStatsigInfo.enabled;
     btn.innerHTML = originalHtml;
   }
@@ -852,6 +865,10 @@ async function saveManualStatsig() {
       throw new Error(data.detail || data.message || `HTTP ${res.status}`);
     }
     currentStatsigInfo = data && data.data ? data.data : currentStatsigInfo;
+    const effectiveBox = byId('statsig-value');
+    if (effectiveBox) {
+      effectiveBox.value = currentStatsigInfo.effective_statsig_id || '';
+    }
     showToast(data.message || '手动 x-statsig-id 已更新', 'success');
     await loadData();
   } catch (e) {

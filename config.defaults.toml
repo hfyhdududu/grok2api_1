@@ -299,3 +299,4 @@ concurrent = 100
 batch_size = 50
 # Usage 请求超时时间（秒）
 timeout = 60
+# 手动 x-statsig-id 仅在尚无浏览器捕获值时作为兜底；probe 成功捕获后会自动清空此项

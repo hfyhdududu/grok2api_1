@@ -321,12 +321,13 @@ def build_headers(cookie_token: str, content_type: Optional[str] = None, origin:
 
     # X-Statsig-ID and X-XAI-Request-ID
     manual_statsig = str(get_config("cloakbrowser.manual_statsig_id", "") or "").strip()
+    captured_statsig = str(session.get("x_statsig_id") or headers.get("x-statsig-id") or "").strip()
     headers["x-statsig-id"] = (
         manual_statsig
-        or str(session.get("x_statsig_id") or "").strip()
-        or headers.get("x-statsig-id")
+        or captured_statsig
         or StatsigGenerator.gen_id(cookie_token)
     )
+    using_manual_statsig = bool(manual_statsig)
     headers["x-xai-request-id"] = str(uuid.uuid4())
 
     # Print headers without Cookie
@@ -339,7 +340,7 @@ def build_headers(cookie_token: str, content_type: Optional[str] = None, origin:
     safe_headers["SessionSource"] = "browser" if session_cookie_header else "fallback"
     safe_headers["SessionCookieLen"] = len(session_cookie_header or "")
     safe_headers["SessionHasStatsig"] = bool(session.get("x_statsig_id"))
-    safe_headers["ManualStatsig"] = bool(manual_statsig)
+    safe_headers["ManualStatsig"] = using_manual_statsig
     safe_headers["BrowserBridgeEnabled"] = browser_bridge_enabled
     safe_headers["BrowserSyncSession"] = sync_browser_session
     safe_headers["CapturedHeaderKeys"] = (

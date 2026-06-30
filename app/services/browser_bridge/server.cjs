@@ -762,6 +762,96 @@ async function hasInaccessiblePrivateLink(page) {
   }
 }
 
+
+function isPersistedConversationUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    return /^\/c\//.test(parsed.pathname) && !String(parsed.hash || "").includes("private");
+  } catch (_) {
+    return false;
+  }
+}
+
+async function isPrivateChatSurface(page) {
+  try {
+    const href = page.url();
+    if (String(href).includes("#private") || /\/c#\/?$/.test(href.replace(/\?.*$/, ""))) {
+      return true;
+    }
+    return await page.evaluate(() => {
+      const text = document.body?.innerText || "";
+      return /不会出现在你的历史记录|不会用于模型训练|won't appear in your history|not be used for model training/i.test(text);
+    });
+  } catch (_) {
+    return false;
+  }
+}
+
+async function clickNewChatAction(page, label) {
+  const newChatCandidates = [
+    page.locator('a[href="/"]').first(),
+    page.locator('a[href="/?new=1"]').first(),
+    page.getByRole("link", { name: /新建聊天|New chat/i }).first(),
+    page.locator('button:has-text("新建聊天")').first(),
+    page.locator('button:has-text("开始新聊天")').first(),
+    page.locator('button:has-text("New chat")').first(),
+  ];
+  for (const locator of newChatCandidates) {
+    try {
+      if (await locator.isVisible({ timeout: 750 }).catch(() => false)) {
+        await locator.click({ timeout: 2500 }).catch(() => {});
+        if (!MINIMAL_LOAD) {
+          await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+        }
+        log(`${label}: clicked new-chat action`);
+        return true;
+      }
+    } catch (_) {}
+  }
+  return false;
+}
+
+async function navigateToPrivateProbeSurface(page, label) {
+  const privateUrl = "https://grok.com/c#private";
+  if (isPersistedConversationUrl(page.url())) {
+    log(`${label}: leaving persisted conversation url=${page.url()}`);
+  }
+  if (!(await isPrivateChatSurface(page)) || isPersistedConversationUrl(page.url())) {
+    await page.goto(privateUrl, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
+    await dismissCookieBanner(page).catch(() => {});
+    log(`${label}: navigated to private chat surface`);
+  }
+  const privateLinkCandidates = [
+    page.getByRole("link", { name: /私密模式|Private/i }).first(),
+    page.locator('a[href="/c#private"]').first(),
+    page.locator('a[href*="#private"]').first(),
+  ];
+  for (const locator of privateLinkCandidates) {
+    try {
+      if (await locator.isVisible({ timeout: 1000 }).catch(() => false)) {
+        await locator.click({ timeout: 3000 }).catch(() => {});
+        log(`${label}: clicked private-mode link`);
+        break;
+      }
+    } catch (_) {}
+  }
+  if (!(await isPrivateChatSurface(page))) {
+    await page.goto(privateUrl, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
+    await dismissCookieBanner(page).catch(() => {});
+  }
+  const input = await waitForChatComposer(
+    page,
+    MINIMAL_LOAD ? CHAT_INPUT_TIMEOUT_MS : READY_TIMEOUT,
+    `${label}-private`
+  );
+  if (!input) {
+    await captureDiagnostics(page, `${label}-private-no-input`);
+    throw new BridgeError("input_unavailable", `Private chat input not available for ${label}`, 502);
+  }
+  log(`${label}: private chat surface ready url=${page.url()}`);
+  return input;
+}
+
 async function navigateToUsableChat(page, label) {
   const target = PRIVATE_CHAT_URL && PRIVATE_CHAT_URL !== "https://grok.com/c#private"
     ? PRIVATE_CHAT_URL
@@ -828,8 +918,15 @@ async function navigateToUsableChat(page, label) {
 
 
 async function prepareUsableChat(page, label, options = {}) {
+  if (options.forcePrivate === true) {
+    return navigateToPrivateProbeSurface(page, label);
+  }
   const skipInitialGoto = options.skipInitialGoto === true;
   if (skipInitialGoto) {
+    if (isPersistedConversationUrl(page.url())) {
+      log(`${label}: prepared page is persisted conversation, switching to private surface`);
+      return navigateToPrivateProbeSurface(page, label);
+    }
     await dismissCookieBanner(page).catch(() => {});
     const quickInput = await findEditableComposer(page);
     if (quickInput && (await quickInput.isVisible({ timeout: 2000 }).catch(() => false))) {
@@ -854,7 +951,7 @@ async function prepareUsableChat(page, label, options = {}) {
 function composerSendButtonLocator(page) {
   return page
     .locator(
-      'button[type="submit"]:not([disabled]), button[aria-label*="Send"]:not([disabled]), button[aria-label*="send"]:not([disabled]), button[aria-label*="发送"]:not([disabled]), button[data-testid*="send"]:not([disabled])'
+      'button[type="submit"]:not([disabled]), button[aria-label*="Send"]:not([disabled]), button[aria-label*="send"]:not([disabled]), button[aria-label*="发送"]:not([disabled]), button[aria-label*="提交"]:not([disabled]), button[data-testid*="send"]:not([disabled])'
     )
     .last();
 }
@@ -1058,12 +1155,13 @@ async function submitProbeFromReadyPage(page, input, label) {
     try {
       await strategy();
       const requestMatched = await requestPromise.then(() => true).catch(() => false);
-      const composerCleared = (await clearedPromise) !== null;
-      if (requestMatched || composerCleared) {
-        log(
-          `${label}: probe submit ${requestMatched ? "triggered request" : "cleared composer without captured request"}`
-        );
+      if (requestMatched) {
+        log(`${label}: probe submit triggered request`);
         return true;
+      }
+      const composerCleared = (await clearedPromise) !== null;
+      if (composerCleared) {
+        log(`${label}: probe submit cleared composer without captured request`);
       }
     } catch (_) {}
   }
@@ -1154,6 +1252,9 @@ async function enableTemporaryMode(page, desiredTemporary) {
   if (!desiredTemporary) return false;
 
   const candidates = [
+    page.getByRole("link", { name: /私密模式|Private/i }).first(),
+    page.locator('a[href="/c#private"]').first(),
+    page.locator('a[href*="#private"]').first(),
     page.locator('button[aria-label*="Temporary"]').first(),
     page.locator('button:has-text("Temporary")').first(),
     page.locator('button:has-text("临时")').first(),
@@ -1391,6 +1492,18 @@ async function waitForCapturedHeaders(sso, timeoutMs) {
   return hasCapturedAppChatHeaders(sso);
 }
 
+
+async function waitForSlotProbeReady(slot, label) {
+  const deadline = Date.now() + Math.min(REQUEST_TIMEOUT, 90000);
+  while (slot.busy && Date.now() < deadline) {
+    log(`${label}: waiting for bridge page to become idle`);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  if (slot.busy) {
+    throw new BridgeError("page_busy", "Bridge page busy", 429);
+  }
+}
+
 async function probeAppChatHeaders(slot, force = false, credentials = {}) {
   if (!force && hasCapturedAppChatHeaders(slot.sso)) {
     return sessionSnapshots.get(slot.sso) || {};
@@ -1423,11 +1536,14 @@ async function probeAppChatHeaders(slot, force = false, credentials = {}) {
       skipInitialGoto = true;
     }
   }
-  let input = await prepareUsableChat(page, "probe", { skipInitialGoto });
-  let attemptedReuse = skipInitialGoto;
+  let input = await prepareUsableChat(page, "probe", { forcePrivate: true });
+  let attemptedReuse = false;
 
   while (true) {
     await enableTemporaryMode(page, true);
+    if (!(await isPrivateChatSurface(page))) {
+      input = await navigateToPrivateProbeSurface(page, "probe-ensure-private");
+    }
     slot.probePageInfo = await page
       .evaluate(() => ({
         darkModeEnabled: window.matchMedia?.("(prefers-color-scheme: dark)")?.matches || false,
@@ -1455,7 +1571,7 @@ async function probeAppChatHeaders(slot, force = false, credentials = {}) {
       if (!submitted) {
         if (attemptedReuse) {
           log("probe: prepared page submit not triggered, fallback to full navigation");
-          input = await navigateToUsableChat(page, "probe-fallback");
+          input = await navigateToPrivateProbeSurface(page, "probe-fallback");
           attemptedReuse = false;
           continue;
         }
@@ -1590,9 +1706,7 @@ const server = http.createServer(async (req, res) => {
         cookies: Array.isArray(body.cookies) ? body.cookies : [],
       };
       const slot = await getSlot(sso);
-      if (slot.busy) {
-        throw new BridgeError("page_busy", "Bridge page busy", 429);
-      }
+      await waitForSlotProbeReady(slot, "probe-api");
       slot.busy = true;
       slot.lastUsed = Date.now();
       try {
