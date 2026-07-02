@@ -55,6 +55,15 @@ cf_clearance = ""
 # curl_cffi 浏览器指纹
 browser = "chrome136"
 # User-Agent 字符串
+# 是否启用 aurora 纯算法生成 x-statsig-id（无需浏览器）
+statsig_pure_enabled = true
+# 可选：整段固定 x-statsig-id（一般留空）
+statsig_id = ""
+# 可选：真实 (seed, hex) 对，算法轮换时可覆盖内置默认值
+statsig_seed = ""
+statsig_hex = ""
+# 为 true 时才使用浏览器 probe 捕获的 x-statsig-id
+statsig_use_browser_capture = false
 user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 
 

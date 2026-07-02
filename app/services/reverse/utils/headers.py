@@ -13,23 +13,23 @@ from app.services.reverse.utils.statsig import StatsigGenerator
 
 _HEADER_CHAR_REPLACEMENTS = str.maketrans(
     {
-        "\u2010": "-",  # hyphen
-        "\u2011": "-",  # non-breaking hyphen
-        "\u2012": "-",  # figure dash
-        "\u2013": "-",  # en dash
-        "\u2014": "-",  # em dash
-        "\u2212": "-",  # minus sign
-        "\u2018": "'",  # left single quote
-        "\u2019": "'",  # right single quote
-        "\u201c": '"',  # left double quote
-        "\u201d": '"',  # right double quote
-        "\u00a0": " ",  # nbsp
-        "\u2007": " ",  # figure space
-        "\u202f": " ",  # narrow nbsp
-        "\u200b": "",  # zero width space
-        "\u200c": "",  # zero width non-joiner
-        "\u200d": "",  # zero width joiner
-        "\ufeff": "",  # bom
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u00a0": " ",
+        "\u2007": " ",
+        "\u202f": " ",
+        "\u200b": "",
+        "\u200c": "",
+        "\u200d": "",
+        "\ufeff": "",
     }
 )
 
@@ -48,7 +48,6 @@ def _sanitize_header_value(
     else:
         normalized = normalized.strip()
 
-    # curl_cffi header encoding defaults to latin-1.
     normalized = normalized.encode("latin-1", errors="ignore").decode("latin-1")
 
     if normalized != raw:
@@ -59,25 +58,13 @@ def _sanitize_header_value(
 
 
 def build_sso_cookie(sso_token: str) -> str:
-    """
-    Build SSO Cookie string.
-
-    Args:
-        sso_token: str, the SSO token.
-
-    Returns:
-        str: The SSO Cookie string.
-    """
-    # Format
     sso_token = sso_token[4:] if sso_token.startswith("sso=") else sso_token
     sso_token = _sanitize_header_value(
         sso_token, field_name="sso_token", remove_all_spaces=True
     )
 
-    # SSO Cookie
     cookie = f"sso={sso_token}; sso-rw={sso_token}"
 
-    # CF Cookies
     cf_cookies = _sanitize_header_value(
         get_config("proxy.cf_cookies") or "", field_name="proxy.cf_cookies"
     )
@@ -86,8 +73,6 @@ def build_sso_cookie(sso_token: str) -> str:
         field_name="proxy.cf_clearance",
         remove_all_spaces=True,
     )
-    # 与上游一致：只要配置里存在 cf_clearance，就强制合并进 Cookie，
-    # 避免 proxy.enabled=true 时只发送旧 cf_cookies 而忽略最新 clearance。
     if cf_clearance and cf_cookies:
         if re.search(r"(?:^|;\s*)cf_clearance=", cf_cookies):
             cf_cookies = re.sub(
@@ -199,17 +184,6 @@ def _build_client_hints(browser: Optional[str], user_agent: Optional[str]) -> Di
 
 
 def build_ws_headers(token: Optional[str] = None, origin: Optional[str] = None, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-    """
-    Build headers for WebSocket requests.
-
-    Args:
-        token: Optional[str], the SSO token for Cookie. Defaults to None.
-        origin: Optional[str], the Origin value. Defaults to "https://grok.com" if not provided.
-        extra: Optional[Dict[str, str]], extra headers to merge. Defaults to None.
-
-    Returns:
-        Dict[str, str]: The headers dictionary.
-    """
     user_agent = _sanitize_header_value(
         get_config("proxy.user_agent"), field_name="proxy.user_agent"
     )
@@ -237,22 +211,24 @@ def build_ws_headers(token: Optional[str] = None, origin: Optional[str] = None, 
     return headers
 
 
-def build_headers(cookie_token: str, content_type: Optional[str] = None, origin: Optional[str] = None, referer: Optional[str] = None) -> Dict[str, str]:
-    """
-    Build headers for reverse interfaces.
-
-    Args:
-        cookie_token: str, the SSO token.
-        content_type: Optional[str], the Content-Type value.
-        origin: Optional[str], the Origin value. Defaults to "https://grok.com" if not provided.
-        referer: Optional[str], the Referer value. Defaults to "https://grok.com/" if not provided.
-
-    Returns:
-        Dict[str, str]: The headers dictionary.
-    """
+def build_headers(
+    cookie_token: str,
+    content_type: Optional[str] = None,
+    origin: Optional[str] = None,
+    referer: Optional[str] = None,
+    request_url: Optional[str] = None,
+    method: Optional[str] = None,
+) -> Dict[str, str]:
     browser_bridge_enabled = bool(get_config("cloakbrowser.enabled", False))
     sync_browser_session = bool(get_config("cloakbrowser.sync_session", False))
-    session = get_browser_session(cookie_token) if (browser_bridge_enabled and sync_browser_session) else {}
+    use_browser_statsig = bool(
+        get_config("proxy.statsig_use_browser_capture", False)
+    )
+    session = (
+        get_browser_session(cookie_token)
+        if (browser_bridge_enabled and sync_browser_session)
+        else {}
+    )
     user_agent = _sanitize_header_value(
         session.get("user_agent") or get_config("proxy.user_agent"),
         field_name="proxy.user_agent",
@@ -285,19 +261,17 @@ def build_headers(cookie_token: str, content_type: Optional[str] = None, origin:
             lower_key = clean_key.lower()
             if not clean_key or lower_key in {"cookie", "content-type", "content-length"}:
                 continue
-            if lower_key == "x-xai-request-id":
+            if lower_key in {"x-xai-request-id", "x-statsig-id"}:
                 continue
             headers[clean_key] = _sanitize_header_value(
                 value, field_name=f"browser.request_headers.{clean_key}"
             )
 
-    # Cookie
     session_cookie_header = _sanitize_header_value(
         session.get("cookie_header") or "", field_name="browser.cookie_header"
     )
     headers["Cookie"] = session_cookie_header or build_sso_cookie(cookie_token)
 
-    # Content-Type and Accept/Sec-Fetch-Dest
     if content_type and content_type == "application/json":
         headers["Content-Type"] = "application/json"
         headers["Accept"] = "*/*"
@@ -311,7 +285,6 @@ def build_headers(cookie_token: str, content_type: Optional[str] = None, origin:
         headers["Accept"] = "*/*"
         headers["Sec-Fetch-Dest"] = "empty"
 
-    # Sec-Fetch-Site
     origin_domain = urlparse(headers.get("Origin", "")).hostname
     referer_domain = urlparse(headers.get("Referer", "")).hostname
     if origin_domain and referer_domain and origin_domain == referer_domain:
@@ -319,30 +292,40 @@ def build_headers(cookie_token: str, content_type: Optional[str] = None, origin:
     else:
         headers["Sec-Fetch-Site"] = "same-site"
 
-    # X-Statsig-ID and X-XAI-Request-ID
     manual_statsig = str(get_config("cloakbrowser.manual_statsig_id", "") or "").strip()
-    captured_statsig = str(session.get("x_statsig_id") or headers.get("x-statsig-id") or "").strip()
+    captured_statsig = ""
+    if use_browser_statsig:
+        captured_statsig = str(
+            session.get("x_statsig_id") or headers.get("x-statsig-id") or ""
+        ).strip()
+
+    req_method = (method or "POST").upper()
+    req_url = request_url or "/rest/app-chat/conversations/new"
     headers["x-statsig-id"] = (
         manual_statsig
         or captured_statsig
-        or StatsigGenerator.gen_id(cookie_token)
+        or StatsigGenerator.gen_id(
+            cookie_token,
+            request_url=req_url,
+            method=req_method,
+        )
     )
     using_manual_statsig = bool(manual_statsig)
     headers["x-xai-request-id"] = str(uuid.uuid4())
 
-    # Print headers without Cookie
     safe_headers = dict(headers)
     if "Cookie" in safe_headers:
         safe_headers["Cookie"] = "<redacted>"
     for key in list(safe_headers.keys()):
         if str(key).lower() == "x-statsig-id":
-            safe_headers[key] = "<redacted>"
+            safe_headers[key] = f"<redacted len={len(headers.get('x-statsig-id') or '')}>"
     safe_headers["SessionSource"] = "browser" if session_cookie_header else "fallback"
     safe_headers["SessionCookieLen"] = len(session_cookie_header or "")
     safe_headers["SessionHasStatsig"] = bool(session.get("x_statsig_id"))
     safe_headers["ManualStatsig"] = using_manual_statsig
     safe_headers["BrowserBridgeEnabled"] = browser_bridge_enabled
     safe_headers["BrowserSyncSession"] = sync_browser_session
+    safe_headers["StatsigUseBrowserCapture"] = use_browser_statsig
     safe_headers["CapturedHeaderKeys"] = (
         sorted([str(key) for key in captured_headers.keys()])
         if isinstance(captured_headers, dict)

@@ -279,7 +279,10 @@ class AppChatReverse:
             Any: The response from the request.
         """
         try:
-            if get_config("cloakbrowser.sync_session", True):
+            if (
+                get_config("cloakbrowser.enabled", False)
+                and get_config("cloakbrowser.sync_session", True)
+            ):
                 try:
                     if get_config("cloakbrowser.wait_probe_before_request", True):
                         timeout = float(get_config("cloakbrowser.wait_probe_timeout", 8) or 8)
@@ -297,17 +300,6 @@ class AppChatReverse:
             # Get proxies
             base_proxy = get_config("proxy.base_proxy_url")
             proxies = {"http": base_proxy, "https": base_proxy} if base_proxy else None
-
-            def _build_chat_headers() -> Dict[str, str]:
-                return build_headers(
-                    cookie_token=token,
-                    content_type="application/json",
-                    origin="https://grok.com",
-                    referer="https://grok.com/",
-                )
-
-            # Build headers
-            headers = _build_chat_headers()
 
             # Build payload
             payload = AppChatReverse.build_payload(
@@ -328,6 +320,19 @@ class AppChatReverse:
                 if conversation_id
                 else CHAT_API
             )
+
+            def _build_chat_headers(target_url: str) -> Dict[str, str]:
+                return build_headers(
+                    cookie_token=token,
+                    content_type="application/json",
+                    origin="https://grok.com",
+                    referer="https://grok.com/",
+                    request_url=target_url,
+                    method="POST",
+                )
+
+            # Build headers
+            headers = _build_chat_headers(url)
             logger.info(
                 "AppChat request prepared: "
                 f"requested_model={requested_model or model}, "
@@ -393,7 +398,7 @@ class AppChatReverse:
                             "AppChat 403 with browser probe headers, force refreshing probe and retrying once"
                         )
                         await refresh_browser_probe_managed(token, True, reason="app_chat_403")
-                        headers = _build_chat_headers()
+                        headers = _build_chat_headers(url)
                         response = await _post_once(headers)
                         logger.info(
                             "AppChat retry after browser probe refresh completed: "
