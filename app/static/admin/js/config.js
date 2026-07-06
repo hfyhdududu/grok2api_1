@@ -87,7 +87,7 @@ const LOCALE_MAP = {
 
 
   "proxy": {
-    "label": "代理配置",
+    "label": "FlareSolverr 与代理",
     "base_proxy_url": { title: "基础代理 URL", desc: "代理请求到 Grok 官网的基础服务地址。" },
     "asset_proxy_url": { title: "资源代理 URL", desc: "代理请求到 Grok 官网的静态资源（图片/视频）地址。" },
     "enabled": { title: "启用 CF 自动刷新", desc: "启用后将通过 FlareSolverr 自动获取 cf_clearance。" },
@@ -97,11 +97,11 @@ const LOCALE_MAP = {
     "cf_clearance": { title: "CF Clearance", desc: "Cloudflare Clearance Cookie，用于绕过反爬虫验证。启用自动刷新时由系统自动管理。" },
     "browser": { title: "浏览器指纹", desc: "curl_cffi 浏览器指纹标识（如 chrome136）。启用自动刷新时由系统自动管理。" },
     "user_agent": { title: "User-Agent", desc: "HTTP 请求的 User-Agent 字符串。启用自动刷新时由系统自动管理。" },
-    "statsig_pure_enabled": { title: "启用纯算法 Statsig", desc: "开启后使用内置算法生成 x-statsig-id。通常保持开启。" },
-    "statsig_id": { title: "固定 x-statsig-id", desc: "可选。填写后会直接使用该固定值。一般留空，优先使用 seed 与 HEX 配对。" },
-    "statsig_seed": { title: "Statsig Seed", desc: "真实页面捕获的 Statsig seed。必须与 Statsig HEX 成对填写。" },
-    "statsig_hex": { title: "Statsig HEX", desc: "真实页面捕获的 SVG 指纹 HEX。必须与 Statsig Seed 成对填写。" },
-    "statsig_use_browser_capture": { title: "使用浏览器捕获 Statsig", desc: "开启后优先使用真实浏览器捕获的 x-statsig-id。默认关闭。" }
+    "statsig_pure_enabled": { title: "使用 seed/hex 生成 xid", desc: "开启后使用 Statsig Seed 与 Statsig HEX 在本地生成新的 x-statsig-id。当前推荐开启。" },
+    "statsig_id": { title: "固定 x-statsig-id", desc: "手动固定完整 xid。填写后会直接使用该值。一般留空，优先使用 seed/hex 生成。" },
+    "statsig_seed": { title: "Statsig Seed", desc: "真实页面捕获到的 seed。可以手动填写，也可以通过浏览器 probe 自动刷新。必须与 HEX 成对使用。" },
+    "statsig_hex": { title: "Statsig HEX", desc: "真实页面捕获到的 HEX。可以手动填写，也可以通过浏览器 probe 自动刷新。必须与 Seed 成对使用。" },
+    "statsig_use_browser_capture": { title: "使用浏览器捕获 xid", desc: "开启后优先使用浏览器请求中捕获到的完整 x-statsig-id。默认关闭。" }
   },
 
 
@@ -213,17 +213,17 @@ const LOCALE_MAP = {
 
 
   "cloakbrowser": {
-    "label": "CloakBrowser",
-    "enabled": { title: "启用浏览器桥", desc: "默认不需要开启。仅在动态 Statsig 方案仍被 403 时，再启用真实浏览器增强修复。" },
+    "label": "浏览器桥",
+    "enabled": { title: "启用浏览器桥", desc: "开启后可使用真实浏览器刷新 seed/hex、捕获 xid 或同步会话。" },
     "headless": { title: "无头模式", desc: "关闭后可看到真实浏览器窗口，便于手动过验证和观察页面状态。" },
     "global_probe": { title: "全局 Probe", desc: "启用后同一份 x-statsig-id 和请求头可被多个 SSO 复用。" },
     "refresh_probe_on_403": { title: "403 时刷新 Probe", desc: "当 chat 请求返回 403 时，强制重新抓取一次真实浏览器 probe 并重试。" },
-    "statsig_auto_refresh_enabled": { title: "启用定时刷新 Statsig", desc: "开启后，程序会按设定时间自动刷新一次 x-statsig-id，行为类似 FlareSolverr 的定时刷新。" },
-    "statsig_refresh_interval": { title: "Statsig 刷新间隔（秒）", desc: "定时刷新 x-statsig-id 的时间间隔。建议先保守设置，比如 1800 秒或更长。" },
+    "statsig_auto_refresh_enabled": { title: "自动刷新 seed/hex", desc: "开启后按间隔调用浏览器 probe，自动抓取并写回 Statsig Seed 与 HEX。" },
+    "statsig_refresh_interval": { title: "seed/hex 刷新间隔（秒）", desc: "自动刷新 seed/hex 的间隔。建议 1800 秒或更长，过短会频繁拉起浏览器。" },
     "sync_session": { title: "同步真实会话", desc: "启用后将浏览器抓到的 Cookie、UA 和请求头同步给 HTTP reverse。默认关闭，优先使用上游动态 Statsig 方案。" },
     "profile_session": { title: "复用浏览器 Profile", desc: "允许直接使用浏览器 profile 中已登录的 Grok 会话。" },
-    "session_cookies_json": { title: "会话 Cookies JSON", desc: "可粘贴完整浏览器 Cookie 数组。Docker 或独立浏览器环境推荐使用，用于注入已登录 Grok 会话。" },
-    "manual_statsig_id": { title: "手动 Statsig", desc: "可临时手填 x-statsig-id；浏览器成功捕获有效值后会自动清空手动值并改用捕获结果。" },
+    "session_cookies_json": { title: "会话 Cookies JSON", desc: "用于初始化浏览器桥会话。浏览器 probe 或浏览器桥对话成功后，会自动写回最新 cookies；Cookie 失效后也可以重新粘贴。" },
+    "manual_statsig_id": { title: "临时 x-statsig-id", desc: "临时手动覆盖完整 xid。浏览器成功捕获有效值后会自动清空手动值并改用捕获结果。" },
     "prewarm_on_start": { title: "启动预热", desc: "服务启动时自动准备浏览器会话与 probe。默认关闭，避免无必要拉起浏览器。" },
     "prewarm_blocking": { title: "阻塞预热", desc: "启用后应用启动完成前会等待浏览器预热结束。通常不建议开启。" },
     "prewarm_mode": { title: "预热模式", desc: "session 只同步会话，probe 还会抓一份可复用的真实 chat headers。" },
@@ -244,9 +244,9 @@ const LOCALE_MAP = {
 
 // 配置部分说明（可选）
 const SECTION_DESCRIPTIONS = {
-  "proxy": "配置不正确将导致 403 错误。服务首次请求 Grok 时的 IP 必须与获取 CF Clearance 时的 IP 一致，后续服务器请求 IP 变化不会导致 403。",
+  "proxy": "这里配置 FlareSolverr 与代理。服务首次请求 Grok 时的 IP 必须与获取 CF Clearance 时的 IP 一致。",
   "model_routing": "这里可以手动指定每个模型优先走哪个 Token 池。未配置的模型仍会按系统默认路由。",
-  "cloakbrowser": "这里是浏览器增强修复。默认推荐先不启用，优先使用上游动态 Statsig 方案；只有仍然遇到 403 时，再启用真实浏览器抓取会话与 probe。"
+  "cloakbrowser": "浏览器桥只负责提供真实浏览器环境。Statsig 的 seed、hex 与 xid 在下方 Statsig 修复区域统一管理。"
 };
 
 // CF 自动刷新联动禁用字段（全部在 proxy section 内）
@@ -258,8 +258,19 @@ const SECTION_ORDER = new Map(Object.keys(LOCALE_MAP).map((key, index) => [key, 
 const HIDDEN_CONFIG_KEYS = new Map([
   ['app', new Set(['reuse_grok_conversation', 'dynamic_statsig'])],
   ['chat', new Set(['capture_enabled', 'capture_file'])],
+  ['proxy', new Set([
+    'statsig_pure_enabled',
+    'statsig_id',
+    'statsig_seed',
+    'statsig_hex',
+    'statsig_use_browser_capture'
+  ])],
   ['cloakbrowser', new Set([
     'mode',
+    'auto_install_bridge_deps',
+    'deps_install_timeout',
+    'auto_install_system_deps',
+    'chrome_cookie_sync',
     'bridge_host',
     'bridge_port',
     'timeout',
@@ -268,6 +279,25 @@ const HIDDEN_CONFIG_KEYS = new Map([
     'idle_page_ms',
     'max_pages',
     'chat_first',
+    'global_probe',
+    'refresh_probe_on_403',
+    'statsig_auto_refresh_enabled',
+    'statsig_refresh_interval',
+    'sync_session',
+    'profile_session',
+    'prewarm_on_start',
+    'prewarm_blocking',
+    'prewarm_mode',
+    'refresh_probe_on_sse_start',
+    'wait_probe_before_request',
+    'wait_probe_timeout',
+    'refresh_probe_after_success',
+    'private_chat_url',
+    'probe_message',
+    'cf_before_probe',
+    'keep_bridge_alive',
+    'minimal_page_load',
+    'retain_static_cache',
     'prewarm_concurrency',
     'probe_cache_file',
     'probe_cache_ttl_seconds',
@@ -646,12 +676,46 @@ function buildStatsigSectionCard() {
 
   const descP = document.createElement('p');
   descP.className = 'text-[var(--accents-4)] text-sm mt-1 mb-4';
-  descP.textContent = '这里集中管理 x-statsig-id 的显示、手动填写与手动刷新。建议先长期复用同一份有效值，只有 403 或你确认失效时再刷新。';
+  descP.textContent = '这里集中管理 seed、hex 与 x-statsig-id。seed/hex 用于本地生成 xid，完整 xid 可手动固定或由浏览器捕获。';
   header.appendChild(descP);
 
   card.appendChild(header);
   card.appendChild(buildStatsigPanel());
   return card;
+}
+
+function buildStatsigConfigGroup(title, desc, fields) {
+  const group = document.createElement('div');
+  group.className = 'rounded-2xl border border-[var(--border)] bg-[var(--bg)] p-4 space-y-3';
+
+  const titleEl = document.createElement('div');
+  titleEl.className = 'text-sm font-medium';
+  titleEl.textContent = title;
+  group.appendChild(titleEl);
+
+  if (desc) {
+    const descEl = document.createElement('p');
+    descEl.className = 'text-xs text-[var(--accents-4)]';
+    descEl.textContent = desc;
+    group.appendChild(descEl);
+  }
+
+  const grid = document.createElement('div');
+  grid.className = 'config-grid';
+  fields.forEach(item => {
+    const sectionConfig = currentConfig && currentConfig[item.section];
+    if (!sectionConfig || !Object.prototype.hasOwnProperty.call(sectionConfig, item.key)) {
+      return;
+    }
+    grid.appendChild(buildFieldCard(item.section, item.key, sectionConfig[item.key]));
+  });
+
+  if (!grid.children.length) {
+    return null;
+  }
+
+  group.appendChild(grid);
+  return group;
 }
 
 async function manualRefreshCfClearance() {
@@ -692,17 +756,17 @@ function buildStatsigPanel() {
   wrap.className = 'mt-5 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 space-y-3';
 
   const top = document.createElement('div');
-  top.className = 'flex flex-col gap-3 md:flex-row md:items-center md:justify-between';
+  top.className = 'flex flex-col gap-1';
 
   const titleBox = document.createElement('div');
   const title = document.createElement('div');
   title.className = 'text-sm font-medium';
-  title.textContent = 'x-statsig-id';
+  title.textContent = '当前状态';
   const desc = document.createElement('div');
   desc.className = 'text-xs text-[var(--accents-4)] mt-1';
   desc.textContent = currentStatsigInfo.enabled
-    ? '这里显示当前生效的 x-statsig-id。你可以直接手填固定值，也可以让真实浏览器自动捕获并长期复用。'
-    : '当前未启用 CloakBrowser bridge，无法捕获真实浏览器 x-statsig-id。';
+    ? '这里显示当前实际生效的 xid 来源。seed/hex 是推荐路径，完整 xid 只作为覆盖兜底。'
+    : '当前未启用浏览器桥，无法自动刷新 seed/hex 或捕获完整 xid。';
   titleBox.appendChild(title);
   titleBox.appendChild(desc);
 
@@ -718,12 +782,11 @@ function buildStatsigPanel() {
       <path d="M3 22v-6h6"></path>
       <path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path>
     </svg>
-    手动刷新 x-statsig-id
+    手动刷新 seed/hex
   `;
   btn.addEventListener('click', manualRefreshStatsig);
 
   top.appendChild(titleBox);
-  top.appendChild(btn);
 
   const summary = document.createElement('div');
   summary.className = 'grid gap-3 md:grid-cols-3';
@@ -754,16 +817,60 @@ function buildStatsigPanel() {
   input.value = currentStatsigInfo.effective_statsig_id || '';
   input.placeholder = currentStatsigInfo.enabled ? '尚未捕获到 x-statsig-id' : '未启用 CloakBrowser bridge';
 
+  const statusGroup = document.createElement('div');
+  statusGroup.className = 'rounded-2xl border border-[var(--border)] bg-[var(--bg)] p-4 space-y-3';
+  statusGroup.appendChild(top);
+  statusGroup.appendChild(summary);
+  statusGroup.appendChild(effectiveLabel);
+  statusGroup.appendChild(input);
+
+  const seedHexGroup = buildStatsigConfigGroup(
+    'seed/hex 配对',
+    '推荐路径。自动刷新会通过浏览器 probe 写回 Seed 与 HEX；手动填写后保存配置即可生效。',
+    [
+      { section: 'cloakbrowser', key: 'statsig_auto_refresh_enabled' },
+      { section: 'cloakbrowser', key: 'statsig_refresh_interval' },
+      { section: 'proxy', key: 'statsig_pure_enabled' },
+      { section: 'proxy', key: 'statsig_seed' },
+      { section: 'proxy', key: 'statsig_hex' }
+    ]
+  );
+
+  if (seedHexGroup) {
+    const refreshRow = document.createElement('div');
+    refreshRow.className = 'flex flex-col gap-2 md:flex-row md:items-center md:justify-between';
+
+    const refreshHint = document.createElement('div');
+    refreshHint.className = 'text-xs text-[var(--accents-4)]';
+    refreshHint.textContent = '手动刷新会立即打开浏览器 probe，并尝试更新 Seed 与 HEX。';
+
+    refreshRow.appendChild(refreshHint);
+    refreshRow.appendChild(btn);
+    seedHexGroup.appendChild(refreshRow);
+  }
+
+  const xidGroup = buildStatsigConfigGroup(
+    'xid 覆盖',
+    '完整 xid 用于临时排查。长期建议留空，让 seed/hex 为每次请求生成新的 x-statsig-id。',
+    [
+      { section: 'proxy', key: 'statsig_id' },
+      { section: 'proxy', key: 'statsig_use_browser_capture' }
+    ]
+  ) || document.createElement('div');
+  if (!xidGroup.className) {
+    xidGroup.className = 'rounded-2xl border border-[var(--border)] bg-[var(--bg)] p-4 space-y-3';
+  }
+
   const manualLabel = document.createElement('div');
   manualLabel.className = 'text-xs font-medium text-[var(--accents-5)]';
-  manualLabel.textContent = '手动填写';
+  manualLabel.textContent = '临时手动 x-statsig-id';
 
   const manualInput = document.createElement('textarea');
   manualInput.id = 'statsig-manual-value';
   manualInput.className = 'geist-input font-mono text-xs min-h-[90px]';
   manualInput.readOnly = false;
   manualInput.value = currentStatsigInfo.manual_statsig_id || '';
-  manualInput.placeholder = '留空则使用浏览器捕获值；保存后立即覆盖当前生效值';
+  manualInput.placeholder = '留空则使用浏览器捕获值；保存后临时覆盖当前生效值';
 
   const actionRow = document.createElement('div');
   actionRow.className = 'flex flex-col gap-2 md:flex-row';
@@ -788,18 +895,20 @@ function buildStatsigPanel() {
   const meta = document.createElement('div');
   meta.className = 'text-xs text-[var(--accents-4)] flex flex-col gap-1';
   meta.innerHTML = `
-    <div>来源优先级：手动填写（保存后）> 浏览器捕获 > 程序动态生成；浏览器刷新捕获成功后会清空手动值并改用捕获结果。</div>
-    <div>建议：优先长期复用一份稳定值，只有出现 403 或确认失效后再刷新。</div>
+    <div>固定 xid 和临时 xid 的作用相同，都是完整值覆盖。临时值由本区域单独保存。</div>
+    <div>浏览器捕获完整 xid 可作为兜底，但推荐优先使用 seed/hex 生成。</div>
   `;
 
-  wrap.appendChild(top);
-  wrap.appendChild(summary);
-  wrap.appendChild(effectiveLabel);
-  wrap.appendChild(input);
-  wrap.appendChild(manualLabel);
-  wrap.appendChild(manualInput);
-  wrap.appendChild(actionRow);
-  wrap.appendChild(meta);
+  xidGroup.appendChild(manualLabel);
+  xidGroup.appendChild(manualInput);
+  xidGroup.appendChild(actionRow);
+  xidGroup.appendChild(meta);
+
+  wrap.appendChild(statusGroup);
+  if (seedHexGroup) {
+    wrap.appendChild(seedHexGroup);
+  }
+  wrap.appendChild(xidGroup);
   return wrap;
 }
 
@@ -828,7 +937,7 @@ async function manualRefreshStatsig() {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       if (res.status === 409) {
-        throw new Error(data.detail || data.message || '已有刷新任务进行中，请稍候');
+        throw new Error(data.detail || data.message || '已有 seed/hex 刷新任务进行中，请稍候');
       }
       throw new Error(data.detail || data.message || `HTTP ${res.status}`);
     }
@@ -836,7 +945,7 @@ async function manualRefreshStatsig() {
     if (input) {
       input.value = currentStatsigInfo.effective_statsig_id || '';
     }
-    showToast(data.message || 'x-statsig-id 已刷新', 'success');
+    showToast('seed/hex 已刷新', 'success');
     await loadData();
   } catch (e) {
     showToast(`刷新失败: ${e.message || e}`, 'error');

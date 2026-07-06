@@ -112,10 +112,18 @@ def _extract_statsig_pair_from_probe(probe_data: Dict[str, Any]) -> tuple[str, s
         return "", ""
     seed = str(probe_data.get("statsig_seed") or "").strip()
     hx = str(probe_data.get("statsig_hex") or "").strip()
-    if not seed or not hx:
+    if not _is_valid_statsig_pair(seed, hx):
         return "", ""
     return seed, hx
 
+
+def _is_valid_statsig_pair(seed: str, hx: str) -> bool:
+    seed=str(seed or '').strip(); hx=str(hx or '').strip()
+    if len(seed)<40 or len(seed)>96: return False
+    if not hx or len(hx)<60 or len(hx)>68: return False
+    try: int(hx,16)
+    except Exception: return False
+    return True
 
 def _should_persist_statsig_pair(
     current_seed: str,
@@ -303,8 +311,16 @@ def _serialize_session_cookies_json(probe_data: Dict[str, Any]) -> str:
 
 async def _sync_statsig_pair_config(probe_data: Dict[str, Any]) -> None:
     """probe 捕获到 seed/hex 后写回 proxy 配置，供纯算法复用。"""
-    if not probe_data or not _has_captured_app_chat_headers(probe_data):
+    if not probe_data:
         return
+    seed, hx = _extract_statsig_pair_from_probe(probe_data)
+    if not seed or not hx:
+        if not _has_captured_app_chat_headers(probe_data):
+            return
+        seed, hx = _extract_statsig_pair_from_probe(probe_data)
+        if not seed or not hx:
+            logger.info("Browser probe statsig pair sync skipped: pair not captured")
+            return
     seed, hx = _extract_statsig_pair_from_probe(probe_data)
     if not seed or not hx:
         logger.info("Browser probe statsig pair sync skipped: pair not captured")
@@ -491,6 +507,19 @@ def _request_sync(sso: str, payload: Dict[str, Any], conversation_id: str = "") 
             },
             status_code=503,
         ) from exc
+
+
+async def _sync_browser_chat_session_config(sso: str) -> None:
+    """浏览器桥对话成功后，将当前浏览器会话状态写回配置。"""
+    try:
+        data = await asyncio.to_thread(_session_request_sync, sso)
+        if not data:
+            return
+        _cache_session(sso or _PROFILE_CACHE_KEY, data)
+        await _sync_session_cookies_config(data)
+        await _sync_statsig_pair_config(data)
+    except Exception as exc:
+        logger.warning(f"Browser chat session config sync skipped: {exc}")
 
 
 def _session_request_sync(sso: str = "") -> Dict[str, Any]:
@@ -805,7 +834,7 @@ def refresh_browser_probe(
     probe_cookies: list | None = None,
 ) -> Dict[str, Any]:
     sso = _extract_raw_sso(token)
-    if not bridge_enabled() or not get_config("cloakbrowser.sync_session", True):
+    if not bridge_enabled():
         return {}
     acquired = _PROBE_REFRESH_LOCK.acquire(blocking=wait)
     if not acquired:
@@ -1024,6 +1053,7 @@ async def request_browser_bridge(
 
     logger.info("BrowserBridge: forwarding Grok app-chat via real browser")
     body = await asyncio.to_thread(_request_sync, sso, payload, conversation_id)
+    await _sync_browser_chat_session_config(sso)
     for raw_line in body.splitlines():
         line = str(raw_line or "").strip()
         if line:
