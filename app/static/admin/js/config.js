@@ -96,7 +96,12 @@ const LOCALE_MAP = {
     "timeout": { title: "挑战超时（秒）", desc: "等待 FlareSolverr 解决 CF 挑战的最大时间。" },
     "cf_clearance": { title: "CF Clearance", desc: "Cloudflare Clearance Cookie，用于绕过反爬虫验证。启用自动刷新时由系统自动管理。" },
     "browser": { title: "浏览器指纹", desc: "curl_cffi 浏览器指纹标识（如 chrome136）。启用自动刷新时由系统自动管理。" },
-    "user_agent": { title: "User-Agent", desc: "HTTP 请求的 User-Agent 字符串。启用自动刷新时由系统自动管理。" }
+    "user_agent": { title: "User-Agent", desc: "HTTP 请求的 User-Agent 字符串。启用自动刷新时由系统自动管理。" },
+    "statsig_pure_enabled": { title: "启用纯算法 Statsig", desc: "开启后使用内置算法生成 x-statsig-id。通常保持开启。" },
+    "statsig_id": { title: "固定 x-statsig-id", desc: "可选。填写后会直接使用该固定值。一般留空，优先使用 seed 与 HEX 配对。" },
+    "statsig_seed": { title: "Statsig Seed", desc: "真实页面捕获的 Statsig seed。必须与 Statsig HEX 成对填写。" },
+    "statsig_hex": { title: "Statsig HEX", desc: "真实页面捕获的 SVG 指纹 HEX。必须与 Statsig Seed 成对填写。" },
+    "statsig_use_browser_capture": { title: "使用浏览器捕获 Statsig", desc: "开启后优先使用真实浏览器捕获的 x-statsig-id。默认关闭。" }
   },
 
 
