@@ -256,7 +256,7 @@ const STATSIG_REFRESH_SUB_KEYS = ['statsig_refresh_interval'];
 
 const SECTION_ORDER = new Map(Object.keys(LOCALE_MAP).map((key, index) => [key, index]));
 const HIDDEN_CONFIG_KEYS = new Map([
-  ['app', new Set(['reuse_grok_conversation'])],
+  ['app', new Set(['reuse_grok_conversation', 'dynamic_statsig'])],
   ['chat', new Set(['capture_enabled', 'capture_file'])],
   ['cloakbrowser', new Set([
     'mode',
