@@ -106,6 +106,29 @@ def _manual_statsig_configured() -> bool:
     return bool(str(get_config("cloakbrowser.manual_statsig_id", "") or "").strip())
 
 
+def _extract_statsig_pair_from_probe(probe_data: Dict[str, Any]) -> tuple[str, str]:
+    """从浏览器 probe 快照中提取 Statsig seed/hex 配对。"""
+    if not isinstance(probe_data, dict):
+        return "", ""
+    seed = str(probe_data.get("statsig_seed") or "").strip()
+    hx = str(probe_data.get("statsig_hex") or "").strip()
+    if not seed or not hx:
+        return "", ""
+    return seed, hx
+
+
+def _should_persist_statsig_pair(
+    current_seed: str,
+    current_hex: str,
+    new_seed: str,
+    new_hex: str,
+) -> bool:
+    """判断捕获到的配对是否需要写回配置。"""
+    if not new_seed or not new_hex:
+        return False
+    return new_seed != current_seed or new_hex != current_hex
+
+
 
 async def _clear_manual_statsig_if_browser_captured(probe_data: Dict[str, Any]) -> None:
     """浏览器抓到有效 x-statsig-id 时，清空手动值，让捕获结果成为生效来源。"""
@@ -275,6 +298,40 @@ def _serialize_session_cookies_json(probe_data: Dict[str, Any]) -> str:
     if fallback:
         return json.dumps(fallback, ensure_ascii=False, indent=2)
     return ""
+
+
+
+async def _sync_statsig_pair_config(probe_data: Dict[str, Any]) -> None:
+    """probe 捕获到 seed/hex 后写回 proxy 配置，供纯算法复用。"""
+    if not probe_data or not _has_captured_app_chat_headers(probe_data):
+        return
+    seed, hx = _extract_statsig_pair_from_probe(probe_data)
+    if not seed or not hx:
+        logger.info("Browser probe statsig pair sync skipped: pair not captured")
+        return
+    current_seed = str(get_config("proxy.statsig_seed", "") or "").strip()
+    current_hex = str(get_config("proxy.statsig_hex", "") or "").strip()
+    if not _should_persist_statsig_pair(current_seed, current_hex, seed, hx):
+        logger.info("Browser probe statsig pair sync skipped: unchanged")
+        return
+    try:
+        from app.core.config import config
+
+        await config.update(
+            {
+                "proxy": {
+                    "statsig_seed": seed,
+                    "statsig_hex": hx,
+                    "statsig_pure_enabled": True,
+                }
+            }
+        )
+        logger.info(
+            "Browser probe statsig pair config synced: "
+            f"seed_len={len(seed)}, hex_len={len(hx)}"
+        )
+    except Exception as exc:
+        logger.warning(f"Browser probe statsig pair config sync skipped: {exc}")
 
 
 async def _sync_session_cookies_config(probe_data: Dict[str, Any]) -> None:
@@ -558,13 +615,19 @@ def _normalize_probe_snapshot(data: Dict[str, Any]) -> Dict[str, Any]:
     statsig = str(data.get("x_statsig_id") or request_headers.get("x-statsig-id") or "").strip()
     if not statsig or not request_headers:
         return {}
-    return {
+    seed = str(data.get("statsig_seed") or "").strip()
+    hx = str(data.get("statsig_hex") or "").strip()
+    out = {
         "request_headers": request_headers,
         "x_statsig_id": statsig,
         "user_agent": str(data.get("user_agent") or "").strip(),
         "captured_at": data.get("captured_at") or "",
         "saved_at": time.time(),
     }
+    if seed and hx:
+        out["statsig_seed"] = seed
+        out["statsig_hex"] = hx
+    return out
 
 
 def _load_global_probe() -> Dict[str, Any]:
@@ -815,6 +878,7 @@ async def refresh_browser_probe_managed(
                     probe_cookies=probe_cookies,
                 )
                 await _sync_session_cookies_config(probe_data)
+                await _sync_statsig_pair_config(probe_data)
                 await _clear_manual_statsig_if_browser_captured(probe_data)
                 return probe_data
             except UpstreamException as exc:

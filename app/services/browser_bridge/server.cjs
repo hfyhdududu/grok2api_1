@@ -251,6 +251,72 @@ function snapshotKeys(slot) {
   return keys;
 }
 
+
+const STATSIG_DIGEST_MARKER = "obfiowerehiring";
+
+async function installStatsigCaptureHook(page) {
+  try {
+    await page.addInitScript(() => {
+      const MARKER = "obfiowerehiring";
+      if (window.__grokStatsigCaptureHooked) return;
+      window.__grokStatsigCaptureHooked = true;
+      window.__grokStatsigCapture = [];
+      const subtle = crypto.subtle;
+      const originalDigest = subtle.digest.bind(subtle);
+      subtle.digest = function (algorithm, data) {
+        try {
+          const bytes =
+            data instanceof ArrayBuffer
+              ? new Uint8Array(data)
+              : new Uint8Array(data.buffer || data);
+          const text = new TextDecoder().decode(bytes);
+          const idx = text.indexOf(MARKER);
+          if (idx >= 0) {
+            const meta =
+              document.querySelector('meta[name="grok-site\u2015verification"]') ||
+              document.querySelector('[name^="gr"]');
+            const seed = meta
+              ? String(meta.content || meta.getAttribute("content") || "")
+              : "";
+            window.__grokStatsigCapture.push({
+              ts: Date.now(),
+              seed,
+              hex: text.slice(idx + MARKER.length),
+            });
+          }
+        } catch (_) {}
+        return originalDigest(algorithm, data);
+      };
+    });
+  } catch (error) {
+    log(`statsig capture hook install failed: ${error.message}`);
+  }
+}
+
+async function readCapturedStatsigPair(page) {
+  try {
+    return await page.evaluate(() => {
+      const list = window.__grokStatsigCapture || [];
+      const last = list[list.length - 1];
+      if (!last || !last.seed || !last.hex) {
+        return { seed: "", hex: "" };
+      }
+      return { seed: String(last.seed), hex: String(last.hex) };
+    });
+  } catch (_) {
+    return { seed: "", hex: "" };
+  }
+}
+
+function mergeStatsigPairIntoSnapshot(snapshot, pair) {
+  if (!pair || !pair.seed || !pair.hex) return snapshot;
+  return {
+    ...snapshot,
+    statsig_seed: String(pair.seed),
+    statsig_hex: String(pair.hex),
+  };
+}
+
 async function captureProbeSnapshot(slot, request, payload) {
   const headers = appChatRequestHeaders(await request.allHeaders());
   const previous =
@@ -263,15 +329,18 @@ async function captureProbeSnapshot(slot, request, payload) {
     x_statsig_id: statsig,
     captured_at: new Date().toISOString(),
   };
+  let finalSnapshot = snapshot;
+  const pair = await readCapturedStatsigPair(slot.page);
+  finalSnapshot = mergeStatsigPairIntoSnapshot(snapshot, pair);
   for (const snapshotKey of snapshotKeys(slot)) {
-    sessionSnapshots.set(snapshotKey, snapshot);
+    sessionSnapshots.set(snapshotKey, finalSnapshot);
   }
   log(
     `captured unconsumed probe headers url=https://grok.com/rest/app-chat/conversations/new temporary=${
       payload?.temporary === true ? "yes" : "no"
-    } statsig=${statsig ? "yes" : "no"} keys=${Object.keys(headers).join(",")}`
+    } statsig=${statsig ? "yes" : "no"} pair=${pair.seed && pair.hex ? "yes" : "no"} keys=${Object.keys(headers).join(",")}`
   );
-  return snapshot;
+  return finalSnapshot;
 }
 
 function ensureProfileDir() {
@@ -1215,8 +1284,11 @@ async function refreshSessionSnapshot(slot) {
     x_statsig_id: previous.x_statsig_id || statsig,
     captured_at: new Date().toISOString(),
   };
+  let finalSnapshot = snapshot;
+  const pair = await readCapturedStatsigPair(page);
+  finalSnapshot = mergeStatsigPairIntoSnapshot(snapshot, pair);
   for (const key of snapshotKeys(slot)) {
-    sessionSnapshots.set(key, snapshot);
+    sessionSnapshots.set(key, finalSnapshot);
   }
 }
 
@@ -1420,13 +1492,16 @@ async function getSlot(sso) {
         x_statsig_id: statsig,
         captured_at: new Date().toISOString(),
       };
+      let finalSnapshot = snapshot;
+      const pair = await readCapturedStatsigPair(slot.page);
+      finalSnapshot = mergeStatsigPairIntoSnapshot(snapshot, pair);
       for (const snapshotKey of snapshotKeys(slot)) {
-        sessionSnapshots.set(snapshotKey, snapshot);
+        sessionSnapshots.set(snapshotKey, finalSnapshot);
       }
       log(
         `captured app-chat headers url=${request.url()} temporary=${
           temporary === null ? "-" : temporary ? "yes" : "no"
-        } statsig=${statsig ? "yes" : "no"} keys=${Object.keys(headers).join(",")}`
+        } statsig=${statsig ? "yes" : "no"} pair=${pair.seed && pair.hex ? "yes" : "no"} keys=${Object.keys(headers).join(",")}`
       );
     } catch (error) {
       log(`capture request headers failed: ${error.message}`);
